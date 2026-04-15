@@ -22,6 +22,15 @@ testbench/frame_live_*.ppm
 docs/phase*_renders/
 **/frame_*.ppm
 **/frame_*.png
+**/cold_*.ppm
+**/cold_*.png
+**/restored_*.ppm
+**/restored_*.png
+**/auto_*.ppm
+**/auto_*.png
+
+# Verilator save/restore snapshots — contain memory state with copyrighted ROMs
+*.state
 
 # Quartus build outputs
 output_files/

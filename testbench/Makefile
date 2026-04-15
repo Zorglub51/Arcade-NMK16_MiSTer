@@ -188,7 +188,7 @@ run_phase4: phase4
 # Phase 4 SDL — same RTL as phase4, driven by SDL window + keyboard.
 # ----------------------------------------------------------------------
 P4SDL_SIM_SRC = $(TB_DIR)/nmk16_phase4_sdl.cpp
-P4SDL_VFLAGS  = --cc --exe --build --no-assert \
+P4SDL_VFLAGS  = --cc --exe --build --no-assert --savable \
                 -Wall -O3 --x-assign fast --x-initial fast \
                 +define+PIX_DIV_VAL=4 \
                 +define+ROM_BIN=\"$(ROM_BIN_F)\" \
@@ -203,7 +203,7 @@ P4SDL_VFLAGS  = --cc --exe --build --no-assert \
                 -Wno-VARHIDDEN -Wno-SELRANGE -Wno-CMPCONST \
                 -Wno-DECLFILENAME -Wno-TIMESCALEMOD \
                 --top-module $(P4_MODULE) \
-                -CFLAGS "-std=c++17 -O3 -march=native -flto $(SDL_CFLAGS)" \
+                -CFLAGS "-std=c++17 -O3 -march=native -flto -include $(abspath fx68k_save_shim.h) $(SDL_CFLAGS)" \
                 -LDFLAGS "-flto $(SDL_LDFLAGS)" \
                 -o sim_phase4_sdl
 

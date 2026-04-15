@@ -18,6 +18,10 @@
 //   F12 ................ snapshot PPM
 //   P .................. pause / resume sim
 //   ESC ................ quit
+//
+// State snapshot (skip the 22 s boot on subsequent runs):
+//   ./sim_phase4_sdl --save-at 40 --save-to boot.state      # one-time
+//   ./sim_phase4_sdl --load-from boot.state                  # every run after
 
 #include <SDL.h>
 #include <cstdio>
@@ -27,6 +31,7 @@
 
 #include "Vnmk16_phase4_top.h"
 #include "verilated.h"
+#include "verilated_save.h"
 
 static const int SCREEN_W = 256;
 static const int SCREEN_H = 224;
@@ -117,6 +122,22 @@ static void update_inputs() {
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
 
+    // CLI: --save-at N --save-to path --load-from path
+    // --load-from skips the boot and resumes instantly at the saved frame.
+    // --save-at+save-to will run until frame N, save state, then continue.
+    int         save_at    = -1;
+    const char* save_to    = nullptr;
+    const char* load_from  = nullptr;
+    int         auto_dump  = -1;   // dump PPM at this (post-start) frame index
+    int         exit_after = -1;   // quit after this many frames
+    for (int i = 1; i < argc; i++) {
+        if      (!strcmp(argv[i], "--save-at")     && i+1 < argc) save_at    = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--save-to")     && i+1 < argc) save_to    = argv[++i];
+        else if (!strcmp(argv[i], "--load-from")   && i+1 < argc) load_from  = argv[++i];
+        else if (!strcmp(argv[i], "--auto-dump")   && i+1 < argc) auto_dump  = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--exit-after")  && i+1 < argc) exit_after = atoi(argv[++i]);
+    }
+
     top = new Vnmk16_phase4_top;
     top->in0_keys = 0xFF;
     top->in1_keys = 0xFFFF;
@@ -133,16 +154,32 @@ int main(int argc, char** argv) {
     SDL_RenderCopy(renderer, texture, nullptr, nullptr);
     SDL_RenderPresent(renderer);
 
-    // Reset
-    top->rst = 1;
-    top->clk = 0;
-    for (int i = 0; i < 64; i++) {
-        top->clk = !top->clk;
-        top->eval();
+    if (load_from) {
+        // Restore state from snapshot — skip reset, skip boot entirely.
+        printf("Loading snapshot from %s ...\n", load_from);
+        fflush(stdout);
+        VerilatedRestore vr;
+        vr.open(load_from);
+        vr >> *top;
+        vr.close();
+        if (vr.isOpen()) {
+            fprintf(stderr, "Snapshot load: unexpected stream state.\n");
+        }
+        printf("Snapshot loaded. Sim resumes from saved state.\n");
+    } else {
+        // Standard cold-start: hold reset then release
+        top->rst = 1;
+        top->clk = 0;
+        for (int i = 0; i < 64; i++) {
+            top->clk = !top->clk;
+            top->eval();
+        }
+        top->rst = 0;
     }
-    top->rst = 0;
 
     printf("Running. 5=COIN, 1=START, Arrows+Z+X=P1. ESC=quit, F12=PPM, P=pause.\n");
+    if (save_at >= 0 && save_to)
+        printf("Will snapshot state at frame %d to %s.\n", save_at, save_to);
     fflush(stdout);
 
     bool running    = true;
@@ -213,6 +250,25 @@ int main(int argc, char** argv) {
             SDL_RenderPresent(renderer);
             pixel_y = 0;
             last_vpos = -1;
+
+            if (save_at >= 0 && save_to && frame == save_at) {
+                printf("Saving snapshot at frame %d → %s ...\n", frame, save_to);
+                fflush(stdout);
+                VerilatedSave vs;
+                vs.open(save_to);
+                vs << *top;
+                vs.close();
+                printf("Snapshot saved.\n");
+                fflush(stdout);
+            }
+            if (auto_dump >= 0 && frame == auto_dump) {
+                char path[64];
+                snprintf(path, sizeof(path), "auto_f%05d.ppm", frame);
+                dump_ppm(path);
+            }
+            if (exit_after >= 0 && frame >= exit_after) {
+                running = false;
+            }
         }
         prev_vpos = vpos;
         prev_hpos = hpos;

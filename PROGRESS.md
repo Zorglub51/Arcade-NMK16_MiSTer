@@ -4,6 +4,7 @@ Living log of phase-by-phase decisions, bugs found, gotchas worth remembering. W
 
 ---
 
+
 Started 2026-04-15. Separate from the existing system32 V60 work — different folder (`NMK_Core/`), different CPU (M68000), different game (hachamf).
 
 **Layout** (folder tree the user requested):
@@ -55,3 +56,9 @@ NMK_Core/
 **Phase 7 v1 handoff done (2026-04-15)**: `deploy/` folder ready for tester. Contents: `NMK16.sv` (MiSTer emu top), `NMK16.qsf`/`.qpf`/`.sdc` (Quartus 17.0), `rtl/nmk16_core.sv` (core extracted from testbench, no `$readmemh`, external ROM ports), `rtl/tilemap.sv`+`irq.sv`+`cpu/fx68k/`, vendored `sys/` from Template_MiSTer, `mra/hachamfb.mra`, 4 markdown docs (README / STATUS / QUICKSTART / TESTER_NOTES). **Smoke-test build only**: program ROM + CPU + VRAM/palette/workram all in BRAM (should fit ~365 of 397 M10K blocks); GFX ROM data pins tied to 0 (display will be colored rectangles, not real art); audio silent. Gets us to "can Quartus synthesize? does framework integration work? do inputs reach CPU?" — not a playable core.
 
 Next: Phase 7 v2 = add SDRAM controller, wire GFX ROMs, get real picture. Likely involves vendoring jtframe_sdram or similar from JTCORES. Also Phase 5 (real audio) and Phase 6 (NMK-113 for parent hachamf set) remain.
+
+**Git repo (2026-04-15)**: https://github.com/Zorglub51/Arcade-NMK16_MiSTer (private). Initial commit has rtl, testbench, docs, deploy, PROGRESS.md (this log). `.gitignore` excludes ROMs, build artifacts, test renders.
+
+**Sim perf profiling finding (2026-04-15)**: Verilator single-core sim runs at ~3.7M master cycles/sec regardless of flags. `--threads 2/4` makes it 3-10× SLOWER (thread overhead beats parallelism). `-O3 -march=native -flto` gives no measurable speedup over default `-Os`. macOS `sample` profiler reveals **23% of sim time is fx68k's `s_nanod`/`s_irdecod` struct equality checks** (unpacked SV structs). Not worth patching fx68k; cycle-accurate 68000 is just expensive in Verilator.
+
+**Snapshot / save-restore (2026-04-15)**: Phase 4 SDL now supports `--save-at N --save-to PATH` and `--load-from PATH` via Verilator `--savable`. Need `fx68k_save_shim.h` force-included via `-CFLAGS "-include ..."` because fx68k's unpacked structs need manual raw-byte serialize operators. Result: cold boot to post-boot frame 200 takes ~30s; restore from snapshot takes **0.30s** (100× faster). Snapshot file ~2.7 MB. State verified: restored sim resumes with identical title-screen render. Workflow: build boot.state once, reuse forever. This is the real UX unlock for interactive sim.
