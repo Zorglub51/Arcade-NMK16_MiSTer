@@ -1,0 +1,75 @@
+<!--
+  Hacha Mecha Fighter (bootleg, no protection) — MRA for NMK16 MiSTer core.
+
+  Phase 7 v1: only the 68000 program ROM is loaded (index 0). GFX ROMs are
+  declared for forward-compatibility with v2 but not currently consumed by
+  the core (bg_gfx_data / tx_gfx_data / spr_gfx_data are tied to 0).
+
+  Source: MAME `nmk16.cpp` ROM_START(hachamfb) @ line 7975–8005.
+
+  Loader index layout (our ioctl_index → core region):
+    0 : maincpu — 256 KiB big-endian words (8.bin even, 7.bin odd)
+    1 : fgtile  (TX) — 128 KiB, not wired in v1
+    2 : bgtile  (BG) — 1 MiB, not wired in v1
+    3 : sprites     — 1 MiB, word-swapped, not wired in v1
+    4 : oki1 samples — 512 KiB, not wired (Phase 5)
+    5 : oki2 samples — 512 KiB, not wired (Phase 5)
+-->
+<misterromdescription>
+  <name>Hacha Mecha Fighter (bootleg)</name>
+  <setname>hachamfb</setname>
+  <rbf>NMK16</rbf>
+  <region>World</region>
+  <year>1991</year>
+  <manufacturer>NMK</manufacturer>
+  <category>Shooter</category>
+  <players>2</players>
+
+  <!-- Program ROM: 8.bin (even) + 7.bin (odd), interleaved into BE words. -->
+  <rom index="0" zip="hachamfb.zip|hachamf.zip" md5="none">
+    <interleave output="16">
+      <part name="8.bin" crc="14845b65" map="01"/>
+      <part name="7.bin" crc="069ca579" map="10"/>
+    </interleave>
+  </rom>
+
+  <!-- TX (fgtile) GFX — v1 ignored. -->
+  <rom index="1" zip="hachamf.zip" md5="none">
+    <part name="5.95" crc="29fb04a2"/>
+  </rom>
+
+  <!-- BG (bgtile) GFX — v1 ignored. -->
+  <rom index="2" zip="hachamf.zip" md5="none">
+    <part name="91076-4.101" crc="df9653a4"/>
+  </rom>
+
+  <!-- Sprite GFX — ROM_LOAD16_WORD_SWAP in MAME. MRA byte-pair swap. -->
+  <rom index="3" zip="hachamf.zip" md5="none">
+    <interleave output="16">
+      <part name="91076-8.57" crc="7fd0f556" map="12"/>
+    </interleave>
+  </rom>
+
+  <!-- OKI #1 samples — Phase 5. -->
+  <rom index="4" zip="hachamf.zip" md5="none">
+    <part name="91076-2.46" crc="3f1e67f2"/>
+  </rom>
+
+  <!-- OKI #2 samples — Phase 5. -->
+  <rom index="5" zip="hachamf.zip" md5="none">
+    <part name="91076-3.45" crc="b25ed93b"/>
+  </rom>
+
+  <!-- DIP switches: set by OSD, not via MRA defaults. -->
+  <switches default="FFFF">
+    <dip name="Lives"        bits="6,7" ids="1,2,4,3"/>
+    <dip name="Difficulty"   bits="2,3" ids="Hardest,Hard,Easy,Normal"/>
+    <dip name="Language"     bits="1"   ids="Japanese,English"/>
+    <dip name="Flip Screen"  bits="0"   ids="On,Off"/>
+    <dip name="Demo Sounds"  bits="9"   ids="Off,On"/>
+  </switches>
+
+  <!-- Joystick: standard MiSTer arcade 6-button layout. -->
+  <buttons names="B1,B2,-,-,-,-,Start,Coin,Service"
+           default="A,B,-,-,-,-,R,L,Select"/>
+</misterromdescription>

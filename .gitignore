@@ -1,0 +1,47 @@
+# Game ROM files — copyright NMK/Jaleco, never commit.
+roms/
+*.hex
+*.bin
+
+# Verilator + build artifacts
+testbench/obj_dir/
+*.o
+*.a
+*.d
+*.pch
+*.gch
+
+# Sim output files
+testbench/*.log
+*.log
+testbench/frame_*.ppm
+testbench/frame_*.png
+testbench/frame_live_*.ppm
+
+# Test render outputs — contain copyrighted NMK game art. Do not commit.
+docs/phase*_renders/
+**/frame_*.ppm
+**/frame_*.png
+
+# Quartus build outputs
+output_files/
+db/
+incremental_db/
+greybox_tmp/
+qdb/
+*.rpt
+*.summary
+*.jdi
+*.pin
+*.sof
+*.pof
+*.rbf
+*.qar
+
+# IDE and OS junk
+.vscode/
+.idea/
+.DS_Store
+*~
+*.swp
+*.bak

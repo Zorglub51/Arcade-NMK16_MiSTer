@@ -1,0 +1,21 @@
+# NMK16 core RTL file list — consumed by Quartus via files.qip in NMK16.qsf.
+# Order: top-level (emu) → core → support modules → CPU.
+
+set_global_assignment -name SYSTEMVERILOG_FILE NMK16.sv
+
+# Core RTL
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/nmk16_core.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tilemap.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/irq.sv
+
+# FX68K CPU (GPL v3)
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/fx68k/fx68k.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/fx68k/fx68kAlu.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/fx68k/uaddrPla.sv
+
+# FX68K microcode ROMs (must be readable at runtime by Quartus toolflow)
+set_global_assignment -name MIF_FILE rtl/cpu/fx68k/microrom.mem
+set_global_assignment -name MIF_FILE rtl/cpu/fx68k/nanorom.mem
+
+# PLL (from MiSTer template)
+set_global_assignment -name QIP_FILE rtl/pll.qip
