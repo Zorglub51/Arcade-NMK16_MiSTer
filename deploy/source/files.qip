@@ -8,6 +8,10 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/nmk16_core.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tilemap.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/irq.sv
 
+# SDRAM controller + ioctl-to-SDRAM loader (Phase 7 v2a)
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/sdram.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/gfx_loader.sv
+
 # FX68K CPU (GPL v3)
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/fx68k/fx68k.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cpu/fx68k/fx68kAlu.sv

@@ -18,21 +18,25 @@ These are confirmed-working behaviours from our testbench harness. The exact sam
 | Palette decoder | ✅ `RRRRGGGGBBBBRGBx` → RGB24 | Phase 3 |
 | NMK004 echo stub | ✅ Unblocks attract mode | Phase 5 Stage 1 |
 
-## Phase 7 v1 (this handoff) — FPGA-side
+## Phase 7 v2a (this handoff) — FPGA-side
 
-| Item | v1 state |
+| Item | state |
 |---|---|
 | `emu.sv` top module | ✅ Written (`NMK16.sv`) |
 | Quartus project files | ✅ `NMK16.qsf`/`.qpf`/`.sdc` |
 | PLL 50→96 MHz | ✅ Vendored from template |
 | HPS_IO integration | ✅ Wired for joystick + ROM download + OSD |
 | Program ROM via ioctl | ✅ Loads 256 KiB into BRAM on `ioctl_index=0` |
-| Workram / VRAM / palette | ✅ All BRAM, fit within Cyclone V SE budget |
+| Workram / VRAM / palette | ✅ All BRAM |
 | Sprite framebuffer | ✅ BRAM (90 M10K blocks) |
-| BG/TX/sprite GFX ROMs | ❌ **Not wired** — data pins tied to 0 |
+| **SDRAM controller** | ✅ **New v2a** — `rtl/sdram.sv`, drives SDRAM_* pins |
+| **GFX → SDRAM loader** | ✅ **New v2a** — `rtl/gfx_loader.sv`, writes indices 1/2/3 to SDRAM |
+| BG/TX/sprite GFX reads | ❌ Still tied to 0 — v2b adds the tile prefetch |
 | Audio | ❌ Silent — `AUDIO_L/R = 0` |
-| Video output | ⚠️ Should work structurally, but picture will be partial (no tile patterns) |
-| Timing closure | ⚠️ Unverified — tilemap uses combinational GFX fetch; may need pipeline stages if Quartus fails timing |
+| Video output | ⚠️ Structurally correct; picture is palette-colored blocks (no real art yet) |
+| Timing closure | ⚠️ Unverified — report back |
+
+**v2a goal**: confirm on real hardware that SDRAM initialization, SDRAM writes during ioctl download, and bitstream fit all work. Display looks the same as v1 (colored shapes, not real art) but SDRAM is now populated invisibly. Once v2a is proven, v2b adds the BG/TX/sprite read path for real graphics.
 
 ## Known-unknowns
 

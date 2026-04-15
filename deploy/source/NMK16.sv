@@ -100,9 +100,10 @@ assign ADC_BUS     = 'Z;
 assign USER_OUT    = '1;
 assign {UART_RTS, UART_TXD, UART_DTR} = 0;
 assign {SD_SCK, SD_MOSI, SD_CS}       = 'Z;
-assign {SDRAM_DQ, SDRAM_A, SDRAM_BA, SDRAM_CLK, SDRAM_CKE, SDRAM_DQML, SDRAM_DQMH,
-        SDRAM_nWE, SDRAM_nCAS, SDRAM_nRAS, SDRAM_nCS} = 'Z;
 assign {DDRAM_CLK, DDRAM_BURSTCNT, DDRAM_ADDR, DDRAM_DIN, DDRAM_BE, DDRAM_RD, DDRAM_WE} = '0;
+// SDRAM is now driven by sdram controller — see below. SDRAM_CLK gets the
+// master clock; the rest come from sdram.sv.
+assign SDRAM_CLK = clk_sys;
 assign VGA_SL       = 0;
 assign VGA_F1       = 0;
 assign VGA_SCALER   = 0;
@@ -202,16 +203,88 @@ reg [15:0] prog_rom_reg;
 always @(posedge clk_sys) prog_rom_reg <= prog_rom[prog_rom_addr];
 assign prog_rom_data = prog_rom_reg;
 
-////////////////////////// GFX ROMs — v1 placeholder //////////////////////////
-// v1: tied to 0. Core still runs; display will have palette colours but no
-// tile patterns. v2 will route these to SDRAM.
+////////////////////////// SDRAM + GFX loader (Phase 7 v2a) //////////////////////////
+// v2a: SDRAM controller + ioctl-to-SDRAM loader are instantiated, so during a
+// core load the MRA's GFX ROMs stream into SDRAM. Core's bg/tx/spr_gfx_data
+// pins are still tied to 0 in this step — v2b will add tile prefetch so the
+// picture actually uses SDRAM data.
+//
+// This build lets us verify end-to-end on real hardware that SDRAM init,
+// ioctl writes, and bitstream fit all work, before committing to the more
+// invasive tilemap pipeline changes needed to read during active scan.
+
 wire [19:0] bg_gfx_addr;
 wire [16:0] tx_gfx_addr;
 wire [19:0] spr_gfx_addr;
 
+// v2a: core still sees 0 on gfx data. v2b replaces these.
 wire [7:0] bg_gfx_data  = 8'h00;
 wire [7:0] tx_gfx_data  = 8'h00;
 wire [7:0] spr_gfx_data = 8'h00;
+
+// --- SDRAM write port (driven by gfx_loader) ---
+wire        sdram_wr_req;
+wire        sdram_wr_ack;
+wire [23:0] sdram_wr_addr;
+wire [15:0] sdram_wr_data;
+wire [1:0]  sdram_wr_be;
+
+gfx_loader u_gfx_loader (
+    .clk            (clk_sys),
+    .rst            (reset),
+    .ioctl_download (ioctl_download),
+    .ioctl_wr       (ioctl_wr),
+    .ioctl_addr     (ioctl_addr),
+    .ioctl_dout     (ioctl_dout),
+    .ioctl_index    (ioctl_index),
+    .sdram_wr_req   (sdram_wr_req),
+    .sdram_wr_ack   (sdram_wr_ack),
+    .sdram_wr_addr  (sdram_wr_addr),
+    .sdram_wr_data  (sdram_wr_data),
+    .sdram_wr_be    (sdram_wr_be),
+    .busy           ()
+);
+
+// v2a: read ports are unused this phase — tie requests low.
+sdram u_sdram (
+    .clk        (clk_sys),
+    .rst        (reset),
+
+    .SDRAM_CKE  (SDRAM_CKE),
+    .SDRAM_nCS  (SDRAM_nCS),
+    .SDRAM_nRAS (SDRAM_nRAS),
+    .SDRAM_nCAS (SDRAM_nCAS),
+    .SDRAM_nWE  (SDRAM_nWE),
+    .SDRAM_A    (SDRAM_A),
+    .SDRAM_BA   (SDRAM_BA),
+    .SDRAM_DQML (SDRAM_DQML),
+    .SDRAM_DQMH (SDRAM_DQMH),
+    .SDRAM_DQ   (SDRAM_DQ),
+
+    .wr_req     (sdram_wr_req),
+    .wr_ack     (sdram_wr_ack),
+    .wr_addr    (sdram_wr_addr),
+    .wr_data    (sdram_wr_data),
+    .wr_be      (sdram_wr_be),
+
+    .bg_req     (1'b0),
+    .bg_ack     (),
+    .bg_addr    (24'h0),
+    .bg_data    (),
+    .bg_valid   (),
+
+    .tx_req     (1'b0),
+    .tx_ack     (),
+    .tx_addr    (24'h0),
+    .tx_data    (),
+    .tx_valid   (),
+
+    .spr_req    (1'b0),
+    .spr_ack    (),
+    .spr_addr   (24'h0),
+    .spr_data   (),
+    .spr_valid  ()
+);
 
 ////////////////////////// Joystick → NMK16 inputs //////////////////////////
 // joy0/joy1 standard MiSTer mapping:
