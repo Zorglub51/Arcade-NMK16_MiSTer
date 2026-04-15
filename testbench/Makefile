@@ -33,7 +33,7 @@ TP_VFLAGS  = --cc --exe --build \
              -LDFLAGS "$(SDL_LDFLAGS)" \
              -o sim_$(TP_MODULE)
 
-.PHONY: all run clean test_pattern phase1 run_phase1 phase2 run_phase2 phase3 run_phase3 phase4 run_phase4 phase4_sdl run_phase4_sdl hex
+.PHONY: all run clean test_pattern phase1 run_phase1 phase2 run_phase2 phase3 run_phase3 phase4 run_phase4 phase4_sdl run_phase4_sdl run_fast hex
 
 all: test_pattern
 
@@ -216,6 +216,11 @@ $(OBJ_DIR)/sim_phase4_sdl: $(P4_RTL_SRC) $(P4SDL_SIM_SRC) hex
 
 run_phase4_sdl: phase4_sdl
 	cd $(OBJ_DIR) && ./sim_phase4_sdl
+
+# Launch with instant post-boot snapshot (~0.3 s to interactive).
+# Builds the snapshot on first use, regenerates if sim binary changed.
+run_fast: phase4_sdl
+	$(TB_DIR)/run_fast.sh
 
 test_pattern: $(OBJ_DIR)/sim_$(TP_MODULE)
 
