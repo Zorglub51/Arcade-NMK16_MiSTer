@@ -170,6 +170,9 @@ module nmk16_core (
     (* ramstyle = "M10K" *) reg [15:0] txvram [0:1023];    //  2 KiB
     (* ramstyle = "M10K" *) reg [15:0] palram [0:1023];    //  2 KiB
 
+    // Quartus infers M10K BRAMs initialized to 0 by default.
+    // Verilator needs explicit initialization.
+    `ifdef VERILATOR
     integer ii;
     initial begin
         for (ii = 0; ii < 32768; ii = ii + 1) wram[ii]   = 16'h0000;
@@ -177,6 +180,7 @@ module nmk16_core (
         for (ii = 0; ii < 1024;  ii = ii + 1) txvram[ii] = 16'h0000;
         for (ii = 0; ii < 1024;  ii = ii + 1) palram[ii] = 16'h0000;
     end
+    `endif
 
     // -----------------------------------------------------------------
     // Memory decode
@@ -307,8 +311,10 @@ module nmk16_core (
     localparam int FB_SZ = FB_W * FB_H;
 
     (* ramstyle = "M10K" *) reg [15:0] spr_fb [0:FB_SZ-1];
+    `ifdef VERILATOR
     integer jj;
     initial for (jj = 0; jj < FB_SZ; jj = jj + 1) spr_fb[jj] = 16'h0000;
+    `endif
 
     localparam [2:0] S_IDLE  = 3'd0, S_CLEAR = 3'd1,
                      S_READ  = 3'd2, S_DRAW  = 3'd3, S_NEXT = 3'd4;
