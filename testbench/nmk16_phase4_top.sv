@@ -323,187 +323,36 @@ module nmk16_phase4_top (
         .tx_color(tx_color), .tx_pal(tx_pal), .tx_opaque(tx_opaque)
     );
 
+
     // -----------------------------------------------------------------
-    // Sprite engine — single buffer, trigger on sprdma_trigger.
-    // State machine: IDLE -> CLEAR -> READ -> DRAW -> (next sprite or IDLE)
+    // Sprite engine — scanline renderer with double-buffered line buffer.
+    // Replaces the 57K-entry framebuffer with two 256-entry line buffers.
+    // Matches real NMK16 hardware: per-scanline sprite list walk.
     // -----------------------------------------------------------------
-    localparam int FB_W  = 256;
-    localparam int FB_H  = 224;
-    localparam int FB_SZ = FB_W * FB_H;          // 57344
+    wire [14:0] spr_ram_addr;
+    wire [15:0] spr_ram_data = wram[spr_ram_addr];
+    wire [19:0] spr_gfx_addr_w;
+    wire [7:0]  spr_gfx_data_w = spr_gfx[spr_gfx_addr_w];
+    wire [9:0]  spr_pal_idx_px;
+    wire        spr_opaque_px;
 
-    // spr_fb[]: bit 15 = opaque, bits [9:0] = 10-bit palette index
-    reg [15:0] spr_fb [0:FB_SZ-1];
-    integer k;
-    initial for (k = 0; k < FB_SZ; k = k + 1) spr_fb[k] = 16'h0000;
-
-    localparam [2:0] S_IDLE  = 3'd0,
-                     S_CLEAR = 3'd1,
-                     S_READ  = 3'd2,
-                     S_DRAW  = 3'd3,
-                     S_NEXT  = 3'd4;
-
-    reg [2:0]  sp_state;
-    reg [15:0] clear_idx;
-    reg [7:0]  sprite_idx;
-
-    // Latched sprite attrs (for the sprite currently being drawn)
-    reg [8:0]  sp_x;
-    reg [8:0]  sp_y;
-    reg [15:0] sp_code;
-    reg [3:0]  sp_pal;
-    reg [3:0]  sp_w_tiles;      // 0..15 (width-1)
-    reg [3:0]  sp_h_tiles;      // 0..15
-    reg [3:0]  tile_x_cnt;      // 0..sp_w_tiles
-    reg [3:0]  tile_y_cnt;      // 0..sp_h_tiles
-    reg [3:0]  px_x;            // 0..15 within tile
-    reg [3:0]  px_y;            // 0..15
-
-    // Derived for current pixel
-    wire [15:0] cur_tile_code = sp_code
-                              + {12'd0, tile_y_cnt} * ({12'd0, sp_w_tiles} + 16'd1)
-                              + {12'd0, tile_x_cnt};
-    wire [19:0] cur_gfx_addr  = {cur_tile_code[12:0], px_x[3], px_y[3],
-                                 px_y[2:0], px_x[2:1]};
-    wire [7:0]  cur_gfx_byte  = spr_gfx[cur_gfx_addr];
-    wire [3:0]  cur_pixel     = px_x[0] ? cur_gfx_byte[3:0] : cur_gfx_byte[7:4];
-    // Sprite transparency: NMK16 uses pen 15 as transparent (verified
-    // empirically — pen 0 gave a solid rectangle of sprite palette entry 0
-    // around each sprite, which is how Phase 4 initially rendered).
-    wire        cur_opaque    = (cur_pixel != 4'hF);
-
-    wire [15:0] cur_screen_x_u = {7'd0, sp_x}
-                               + {8'd0, tile_x_cnt, 4'b0}
-                               + {12'd0, px_x};
-    wire [15:0] cur_screen_y_u = {7'd0, sp_y}
-                               + {8'd0, tile_y_cnt, 4'b0}
-                               + {12'd0, px_y};
-    wire        in_bounds     = (cur_screen_x_u < FB_W) &&
-                                (cur_screen_y_u < FB_H);
-    wire [15:0] fb_addr       = cur_screen_y_u * 16'(FB_W) + cur_screen_x_u;
-
-    // One sprite = 8 words in workram, located at word index $4000 + idx*8
-    wire [14:0] spr_src_base  = 15'h4000 + {sprite_idx, 3'b000};
-
-    // Read sprite attrs in a single cycle (all combinational from wram[])
-    wire [15:0] sp_word0 = wram[spr_src_base + 15'd0];   // +0 enable bit 0
-    wire [15:0] sp_word1 = wram[spr_src_base + 15'd1];   // +2 size + flip
-    wire [15:0] sp_word3 = wram[spr_src_base + 15'd3];   // +6 code
-    wire [15:0] sp_word4 = wram[spr_src_base + 15'd4];   // +8 X
-    wire [15:0] sp_word6 = wram[spr_src_base + 15'd6];   // +12 Y
-    wire [15:0] sp_word7 = wram[spr_src_base + 15'd7];   // +14 palette
-
-    wire sp_enabled = sp_word0[0];
-
-    always @(posedge clk) begin
-        if (rst) begin
-            sp_state   <= S_IDLE;
-            clear_idx  <= 16'd0;
-            sprite_idx <= 8'd0;
-            sp_x       <= 9'd0;
-            sp_y       <= 9'd0;
-            sp_code    <= 16'd0;
-            sp_pal     <= 4'd0;
-            sp_w_tiles <= 4'd0;
-            sp_h_tiles <= 4'd0;
-            tile_x_cnt <= 4'd0;
-            tile_y_cnt <= 4'd0;
-            px_x       <= 4'd0;
-            px_y       <= 4'd0;
-        end else begin
-            case (sp_state)
-                S_IDLE: begin
-                    if (sprdma_trigger) begin
-                        sp_state  <= S_CLEAR;
-                        clear_idx <= 16'd0;
-                    end
-                end
-
-                S_CLEAR: begin
-                    spr_fb[clear_idx] <= 16'h0000;
-                    if (clear_idx == 16'(FB_SZ-1)) begin
-                        sp_state   <= S_READ;
-                        sprite_idx <= 8'd0;
-                    end else begin
-                        clear_idx <= clear_idx + 16'd1;
-                    end
-                end
-
-                S_READ: begin
-                    // Latch all attrs this cycle
-                    sp_x       <= sp_word4[8:0];
-                    sp_y       <= sp_word6[8:0];
-                    sp_code    <= sp_word3;
-                    sp_pal     <= sp_word7[3:0];
-                    sp_w_tiles <= sp_word1[3:0];
-                    sp_h_tiles <= sp_word1[7:4];
-                    tile_x_cnt <= 4'd0;
-                    tile_y_cnt <= 4'd0;
-                    px_x       <= 4'd0;
-                    px_y       <= 4'd0;
-
-                    if (!sp_enabled) begin
-                        sp_state <= S_NEXT;
-                    end else begin
-                        sp_state <= S_DRAW;
-                    end
-                end
-
-                S_DRAW: begin
-                    // Write pixel if in active area and non-transparent
-                    if (in_bounds && cur_opaque) begin
-                        spr_fb[fb_addr] <= {1'b1, 5'b0,
-                                            2'b01, sp_pal, cur_pixel};
-                        //                    opaque,                                palette_idx = $100 + pal*16 + pixel
-                    end
-
-                    // Advance pixel counter with 4-deep nesting
-                    if (px_x != 4'd15) begin
-                        px_x <= px_x + 4'd1;
-                    end else begin
-                        px_x <= 4'd0;
-                        if (px_y != 4'd15) begin
-                            px_y <= px_y + 4'd1;
-                        end else begin
-                            px_y <= 4'd0;
-                            if (tile_x_cnt != sp_w_tiles) begin
-                                tile_x_cnt <= tile_x_cnt + 4'd1;
-                            end else begin
-                                tile_x_cnt <= 4'd0;
-                                if (tile_y_cnt != sp_h_tiles) begin
-                                    tile_y_cnt <= tile_y_cnt + 4'd1;
-                                end else begin
-                                    sp_state <= S_NEXT;
-                                end
-                            end
-                        end
-                    end
-                end
-
-                S_NEXT: begin
-                    if (sprite_idx == 8'd255) begin
-                        sp_state <= S_IDLE;
-                    end else begin
-                        sprite_idx <= sprite_idx + 8'd1;
-                        sp_state   <= S_READ;
-                    end
-                end
-
-                default: sp_state <= S_IDLE;
-            endcase
-        end
-    end
+    sprite_line u_sprite_line (
+        .clk          (clk),
+        .rst          (rst),
+        .ce_pix       (ce_pix),
+        .hpos         (hpos_w),
+        .vpos         (vpos_w),
+        .spr_ram_addr (spr_ram_addr),
+        .spr_ram_data (spr_ram_data),
+        .spr_gfx_addr (spr_gfx_addr_w),
+        .spr_gfx_data (spr_gfx_data_w),
+        .spr_pal_idx  (spr_pal_idx_px),
+        .spr_opaque   (spr_opaque_px)
+    );
 
     // -----------------------------------------------------------------
     // Mixer: BG (opaque base) < sprites (when opaque) < TX (when pen != 15)
     // -----------------------------------------------------------------
-    wire [11:0] screen_x = {3'b0, hpos_w} - 12'd92;
-    wire [11:0] screen_y = {3'b0, vpos_w} - 12'd16;
-    wire        in_active = (screen_x < 12'(FB_W)) && (screen_y < 12'(FB_H));
-    wire [15:0] spr_fb_addr = screen_y[7:0] * 16'(FB_W) + {8'd0, screen_x[7:0]};
-    wire [15:0] spr_px = in_active ? spr_fb[spr_fb_addr] : 16'h0000;
-    wire        spr_opaque_px = spr_px[15];
-    wire [9:0]  spr_pal_idx_px= spr_px[9:0];
-
     wire [9:0] bg_pal_idx = {2'b00, bg_pal, bg_color};
     wire [9:0] tx_pal_idx = {2'b10, tx_pal, tx_color};
     wire [9:0] mix_idx    = tx_opaque     ? tx_pal_idx

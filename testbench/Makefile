@@ -148,7 +148,7 @@ run_phase3: phase3
 # Phase 4 — adds sprite engine on top of Phase 3.
 # ----------------------------------------------------------------------
 P4_MODULE   = nmk16_phase4_top
-P4_RTL_SRC  = $(TB_DIR)/$(P4_MODULE).sv $(RTL_DIR)/irq.sv $(RTL_DIR)/tilemap.sv \
+P4_RTL_SRC  = $(TB_DIR)/$(P4_MODULE).sv $(RTL_DIR)/irq.sv $(RTL_DIR)/tilemap.sv $(RTL_DIR)/sprite_line.sv \
               $(RTL_DIR)/cpu/fx68k/fx68k.sv \
               $(RTL_DIR)/cpu/fx68k/fx68kAlu.sv $(RTL_DIR)/cpu/fx68k/uaddrPla.sv
 P4_SIM_SRC  = $(TB_DIR)/nmk16_phase4_main.cpp
