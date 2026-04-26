@@ -222,11 +222,16 @@ wire [7:0] tx_gfx_data  = 8'h00;
 
 // v2b sprite: real SDRAM read port (req/valid). Core does its own line-buffer
 // rendering, so SDRAM latency is invisible to the mixer.
+//
+// Address mapping: sprite_line emits a byte offset within the 1 MiB sprite
+// ROM (0..0xFFFFF). gfx_loader places sprite GFX at SDRAM base 0x400000, so
+// we OR the base in here.
 wire        spr_gfx_req;
 wire        spr_gfx_ack;
-wire [23:0] spr_gfx_addr;
+wire [23:0] spr_gfx_addr;          // sprite-ROM-relative (output of nmk16_core)
 wire [15:0] spr_gfx_data;
 wire        spr_gfx_valid;
+wire [23:0] sdram_spr_addr = spr_gfx_addr | 24'h400000;
 
 // --- SDRAM write port (driven by gfx_loader) ---
 wire        sdram_wr_req;
@@ -287,7 +292,7 @@ sdram u_sdram (
 
     .spr_req    (spr_gfx_req),
     .spr_ack    (spr_gfx_ack),
-    .spr_addr   (spr_gfx_addr),
+    .spr_addr   (sdram_spr_addr),
     .spr_data   (spr_gfx_data),
     .spr_valid  (spr_gfx_valid)
 );
