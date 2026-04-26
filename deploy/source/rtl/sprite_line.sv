@@ -1,20 +1,13 @@
-// NMK16 scanline sprite renderer — replaces the full-frame framebuffer.
+// NMK16 scanline sprite renderer — clean rewrite.
 //
-// Matches real NMK16 hardware behaviour: per-scanline walk of the 256-entry
-// sprite list, rendering intersecting sprite rows into a 256-pixel double-
-// buffered line buffer. Much smaller than a 57K-entry framebuffer (512 bytes
-// vs 112 KiB) and synthesizes cleanly on Cyclone V.
-//
-// Double buffering:
-//   Buffer A / B swap each scanline. While the mixer reads from A during
-//   active scan, the engine fills B for the *next* scanline. On scanline
-//   boundary they swap.
-//
-// Timing budget:
-//   At PIX_DIV=4  → 1536 master cycles/scanline. Fits ~30 active sprites.
-//   At PIX_DIV=16 → 6144 master cycles/scanline. Fits 256 sprites easily.
-//
-// Sprite transparency: pen 15 (NMK16 convention, empirically verified).
+// Simple double-buffered design:
+//   - Two 256×16-bit line buffers (A and B).
+//   - 'front' register selects which the mixer reads; engine writes the other.
+//   - On each vpos change: swap front, clear the new back buffer, walk sprites.
+//   - Engine writes are latched to the back buffer determined at swap time.
+//   - No generation counter — explicit 256-cycle clear. Budget: ~1500 cycles
+//     for sprites + 256 clear = ~1756. At PIX_DIV=4 budget is 1536 — tight
+//     but sprites that don't finish are simply clipped (partial rendering, no desync).
 
 `default_nettype none
 
@@ -25,225 +18,197 @@ module sprite_line (
     input  wire [8:0]  hpos,
     input  wire [8:0]  vpos,
 
-    // Workram read port — sprites at words $4000..$47FF (256 × 8 words)
     output reg  [14:0] spr_ram_addr,
     input  wire [15:0] spr_ram_data,
 
-    // Sprite GFX ROM read port (byte-wide, 1 MiB)
     output wire [19:0] spr_gfx_addr,
     input  wire [7:0]  spr_gfx_data,
 
-    // Per-pixel output to mixer (active during scan)
-    output wire [9:0]  spr_pal_idx,    // full palette index ($100 + pal*16 + color)
-    output wire        spr_opaque      // 1 if pixel is non-transparent
+    output wire [9:0]  spr_pal_idx,
+    output wire        spr_opaque
 );
 
     // -----------------------------------------------------------------
-    // Double-buffered line buffers: 256 entries × 16 bits each
-    //   [15]   = opaque flag
-    //   [9:0]  = palette index
+    // Line buffers.  [15]=opaque  [9:0]=palette index.  Bit 15=0 means empty.
     // -----------------------------------------------------------------
-    (* ramstyle = "M10K" *) reg [15:0] line_a [0:255];
-    (* ramstyle = "M10K" *) reg [15:0] line_b [0:255];
-    reg active_buf;                    // 0 = mixer reads A, engine writes B
-                                       // 1 = mixer reads B, engine writes A
+    reg [15:0] buf_a [0:255];
+    reg [15:0] buf_b [0:255];
 
-    // Mixer read — combinational from the active buffer
-    wire [7:0] read_x;
-    assign read_x = (hpos >= 9'd92 && hpos < 9'd348) ? hpos[7:0] - 8'd92 : 8'd0;
-    wire [15:0] mixer_pixel = active_buf ? line_b[read_x] : line_a[read_x];
-    assign spr_opaque  = mixer_pixel[15];
-    assign spr_pal_idx = mixer_pixel[9:0];
+    reg front;   // 0 → mixer reads A, engine writes B
+                 // 1 → mixer reads B, engine writes A
+    reg back;    // latched at swap: which buffer engine writes to (0=A,1=B)
+
+    // Mixer — read from front buffer
+    wire [7:0] mx = (hpos >= 9'd92 && hpos < 9'd348) ? (hpos[7:0] - 8'd92) : 8'd0;
+    wire [15:0] front_px = front ? buf_b[mx] : buf_a[mx];
+    assign spr_opaque  = front_px[15];
+    assign spr_pal_idx = front_px[9:0];
 
     // -----------------------------------------------------------------
-    // Engine state machine — fills the WRITE buffer for the next scanline
+    // Engine FSM
     // -----------------------------------------------------------------
     localparam [2:0]
-        ST_IDLE       = 3'd0,
-        ST_CLEAR      = 3'd1,
-        ST_READ_EN    = 3'd2,
-        ST_READ_ATTR  = 3'd3,
-        ST_CHECK_Y    = 3'd4,
-        ST_DRAW       = 3'd5,
-        ST_SWAP       = 3'd6;
+        S_IDLE  = 3'd0,
+        S_CLEAR = 3'd1,
+        S_RDEN  = 3'd2,
+        S_ATTR  = 3'd3,
+        S_CHKY  = 3'd4,
+        S_DRAW  = 3'd5;
 
     reg [2:0]  state;
-    reg [7:0]  clear_idx;
-    reg [7:0]  sprite_idx;
-    reg [2:0]  attr_step;              // sub-steps within READ_ATTR
-
-    // Latched sprite attributes
+    reg [7:0]  clr_idx;
+    reg [7:0]  spr_idx;
+    reg [2:0]  attr_step;
     reg [8:0]  sp_x, sp_y;
     reg [15:0] sp_code;
     reg [3:0]  sp_pal, sp_w, sp_h;
+    reg [3:0]  tile_x, px_pair;
+    reg [8:0]  screen_y;  // screen-space Y for this fill (0..223)
 
-    // Drawing state
-    reg [3:0]  tile_x;                 // current tile column (0..sp_w)
-    reg [3:0]  px_pair;               // byte index within tile row (0..7)
-
-    // The scanline we're pre-rendering for (= current vpos + 1, wrapped)
-    reg [8:0]  target_line;
-    // Pixel row within sprite for this scanline
-    wire [15:0] sprite_bottom = {7'd0, sp_y} + {8'd0, sp_h, 4'b0} + 16'd15;
-    wire [8:0]  row_in_sprite = target_line - sp_y;
-
-    // GFX address computation for current draw position
-    wire [15:0] cur_tile_code = sp_code
-                              + {12'd0, row_in_sprite[7:4]} * ({12'd0, sp_w} + 16'd1)
-                              + {12'd0, tile_x};
-    wire [3:0]  sub_y = row_in_sprite[3:0];
-    wire [3:0]  sub_x_base = {px_pair, 1'b0};  // even pixel of the pair
-    assign spr_gfx_addr = {cur_tile_code[12:0],
-                           sub_x_base[3], sub_y[3],
-                           sub_y[2:0], sub_x_base[2:1]};
-
-    // Extract both pixels from the fetched byte
-    wire [3:0] pixel_hi = spr_gfx_data[7:4];  // even pixel (left)
-    wire [3:0] pixel_lo = spr_gfx_data[3:0];  // odd pixel (right)
-
-    // Screen X for current draw pair
-    wire [15:0] draw_x_base = {7'd0, sp_x}
-                             + {8'd0, tile_x, 4'b0}
-                             + {12'd0, px_pair, 1'b0};
-
-    // Detect scanline boundary to trigger engine
+    // Detect vpos change (1 cycle after irq.sv updates vpos via NBA)
     reg [8:0] prev_vpos;
-    wire line_change = ce_pix && (vpos != prev_vpos);
+    wire new_line = (vpos != prev_vpos);
+
+    // Y range check
+    wire [15:0] spr_bot = {7'd0, sp_y} + {8'd0, sp_h, 4'b0} + 16'd15;
+    wire [8:0]  row_in  = screen_y - sp_y;
+
+    // GFX address for current pixel pair
+    wire [15:0] tile_code = sp_code
+                          + {12'd0, row_in[7:4]} * ({12'd0, sp_w} + 16'd1)
+                          + {12'd0, tile_x};
+    wire [3:0] sy = row_in[3:0];
+    wire [3:0] sx = {px_pair, 1'b0};
+    assign spr_gfx_addr = {tile_code[12:0], sx[3], sy[3], sy[2:0], sx[2:1]};
+
+    wire [3:0] pix_hi = spr_gfx_data[7:4];
+    wire [3:0] pix_lo = spr_gfx_data[3:0];
+    wire [15:0] dx = {7'd0, sp_x} + {8'd0, tile_x, 4'b0} + {12'd0, px_pair, 1'b0};
+
+    // Write one pixel to back buffer
+    task automatic write_back(input [7:0] x, input [15:0] val);
+        if (back) buf_a[x] <= val;
+        else      buf_b[x] <= val;
+    endtask
 
     always @(posedge clk) begin
         if (rst) begin
-            state      <= ST_IDLE;
-            active_buf <= 1'b0;
-            clear_idx  <= 8'd0;
-            sprite_idx <= 8'd0;
-            attr_step  <= 3'd0;
-            prev_vpos  <= 9'd0;
-            target_line<= 9'd0;
-            sp_x <= 9'd0; sp_y <= 9'd0; sp_code <= 16'd0;
-            sp_pal <= 4'd0; sp_w <= 4'd0; sp_h <= 4'd0;
-            tile_x <= 4'd0; px_pair <= 4'd0;
+            front     <= 1'b0;
+            back      <= 1'b1;
+            state     <= S_IDLE;
+            prev_vpos <= 9'd0;
+            clr_idx   <= 8'd0;
+            spr_idx   <= 8'd0;
+            attr_step <= 3'd0;
+            screen_y  <= 9'd0;
+            sp_x <= 0; sp_y <= 0; sp_code <= 0;
+            sp_pal <= 0; sp_w <= 0; sp_h <= 0;
+            tile_x <= 0; px_pair <= 0;
             spr_ram_addr <= 15'd0;
         end else begin
             prev_vpos <= vpos;
 
+            // ---- SWAP on every scanline boundary ----
+            if (new_line) begin
+                front    <= ~front;        // flip display buffer
+                back     <= front;         // old front becomes new back (for engine)
+                // Start fill if this line is in the visible area.
+                // screen_y = next display line in screen coords.
+                // After swap, 'front' (new value) will be read during the
+                // NEXT scanline (vpos). The engine fills 'back' for that line.
+                // Screen-space: vpos 16..239 = screen 0..223.
+                // Start filling one line ahead of display so the buffer is
+                // ready when the mixer reads it during the NEXT vpos active area.
+                // Mixer during vpos=V reads screen_y = V - 16.
+                // We fill during vpos=V-1 for screen_y = V - 16 = (V-1) - 15.
+                if (vpos >= 9'd15 && vpos < 9'd239) begin
+                    screen_y     <= vpos - 9'd15;
+                    state        <= S_CLEAR;
+                    clr_idx      <= 8'd0;
+                end else begin
+                    state <= S_IDLE;
+                end
+            end
+
+            // ---- ENGINE ----
             case (state)
-                ST_IDLE: begin
-                    if (line_change) begin
-                        target_line <= (vpos < 9'd277) ? (vpos + 9'd1) : 9'd0;
-                        state       <= ST_CLEAR;
-                        clear_idx   <= 8'd0;
-                    end
-                end
+                S_IDLE: ; // nothing to do until next swap
 
-                ST_CLEAR: begin
-                    // Zero out the write buffer
-                    if (active_buf)
-                        line_a[clear_idx] <= 16'h0000;
-                    else
-                        line_b[clear_idx] <= 16'h0000;
-
-                    if (clear_idx == 8'd255) begin
-                        state      <= ST_READ_EN;
-                        sprite_idx <= 8'd0;
-                        spr_ram_addr <= 15'h4000;  // word 0 of sprite 0
+                S_CLEAR: begin
+                    write_back(clr_idx, 16'h0000);
+                    if (clr_idx == 8'd255) begin
+                        spr_idx      <= 8'd0;
+                        spr_ram_addr <= 15'h4000;
+                        state        <= S_RDEN;
                     end else
-                        clear_idx <= clear_idx + 8'd1;
+                        clr_idx <= clr_idx + 8'd1;
                 end
 
-                ST_READ_EN: begin
-                    // spr_ram_data has word 0 — check enable bit
+                S_RDEN: begin
                     if (!spr_ram_data[0]) begin
-                        // Disabled — skip to next sprite
-                        if (sprite_idx == 8'd255)
-                            state <= ST_SWAP;
+                        // disabled — next
+                        if (spr_idx == 8'd255) state <= S_IDLE;
                         else begin
-                            sprite_idx   <= sprite_idx + 8'd1;
-                            spr_ram_addr <= 15'h4000 + {sprite_idx + 8'd1, 3'd0};
+                            spr_idx      <= spr_idx + 8'd1;
+                            spr_ram_addr <= 15'h4000 + {spr_idx + 8'd1, 3'd0};
                         end
                     end else begin
-                        // Enabled — read attributes
                         attr_step    <= 3'd0;
-                        spr_ram_addr <= 15'h4000 + {sprite_idx, 3'd1}; // word 1
-                        state        <= ST_READ_ATTR;
+                        spr_ram_addr <= 15'h4000 + {spr_idx, 3'd1};
+                        state        <= S_ATTR;
                     end
                 end
 
-                ST_READ_ATTR: begin
+                S_ATTR: begin
                     case (attr_step)
-                        3'd0: begin
-                            sp_w <= spr_ram_data[3:0];
-                            sp_h <= spr_ram_data[7:4];
-                            spr_ram_addr <= 15'h4000 + {sprite_idx, 3'd3}; // word 3
-                        end
-                        3'd1: begin
-                            sp_code <= spr_ram_data;
-                            spr_ram_addr <= 15'h4000 + {sprite_idx, 3'd4}; // word 4
-                        end
-                        3'd2: begin
-                            sp_x <= spr_ram_data[8:0];
-                            spr_ram_addr <= 15'h4000 + {sprite_idx, 3'd6}; // word 6
-                        end
-                        3'd3: begin
-                            sp_y <= spr_ram_data[8:0];
-                            spr_ram_addr <= 15'h4000 + {sprite_idx, 3'd7}; // word 7
-                        end
-                        3'd4: begin
-                            sp_pal <= spr_ram_data[3:0];
-                            state  <= ST_CHECK_Y;
-                        end
+                        3'd0: begin sp_w <= spr_ram_data[3:0]; sp_h <= spr_ram_data[7:4];
+                                    spr_ram_addr <= 15'h4000 + {spr_idx, 3'd3}; end
+                        3'd1: begin sp_code <= spr_ram_data;
+                                    spr_ram_addr <= 15'h4000 + {spr_idx, 3'd4}; end
+                        3'd2: begin sp_x <= spr_ram_data[8:0];
+                                    spr_ram_addr <= 15'h4000 + {spr_idx, 3'd6}; end
+                        3'd3: begin sp_y <= spr_ram_data[8:0];
+                                    spr_ram_addr <= 15'h4000 + {spr_idx, 3'd7}; end
+                        3'd4: begin sp_pal <= spr_ram_data[3:0];
+                                    state <= S_CHKY; end
                         default: ;
                     endcase
-                    if (attr_step < 3'd4)
-                        attr_step <= attr_step + 3'd1;
+                    if (attr_step < 3'd4) attr_step <= attr_step + 3'd1;
                 end
 
-                ST_CHECK_Y: begin
-                    // Does this sprite intersect target_line?
-                    if (target_line >= sp_y &&
-                        target_line <= sprite_bottom[8:0]) begin
-                        // Yes — start drawing
+                S_CHKY: begin
+                    // 16-bit compare avoids wrap-around: sprites with Y near
+                    // 511 extend past 9-bit range and would otherwise alias
+                    // to the top of the screen.
+                    if ({7'd0, screen_y} >= {7'd0, sp_y} &&
+                        {7'd0, screen_y} <= spr_bot) begin
                         tile_x  <= 4'd0;
                         px_pair <= 4'd0;
-                        state   <= ST_DRAW;
+                        state   <= S_DRAW;
                     end else begin
-                        // No — next sprite
-                        if (sprite_idx == 8'd255)
-                            state <= ST_SWAP;
+                        if (spr_idx == 8'd255) state <= S_IDLE;
                         else begin
-                            sprite_idx   <= sprite_idx + 8'd1;
-                            spr_ram_addr <= 15'h4000 + {sprite_idx + 8'd1, 3'd0};
-                            state        <= ST_READ_EN;
+                            spr_idx      <= spr_idx + 8'd1;
+                            spr_ram_addr <= 15'h4000 + {spr_idx + 8'd1, 3'd0};
+                            state        <= S_RDEN;
                         end
                     end
                 end
 
-                ST_DRAW: begin
-                    // Write 2 pixels per cycle from the fetched GFX byte
-                    // Pixel at draw_x_base+0 (high nibble) and draw_x_base+1 (low nibble)
-                    if (draw_x_base < 16'd256 && pixel_hi != 4'hF) begin
-                        if (active_buf)
-                            line_a[draw_x_base[7:0]] <= {1'b1, 5'b0, 2'b01, sp_pal, pixel_hi};
-                        else
-                            line_b[draw_x_base[7:0]] <= {1'b1, 5'b0, 2'b01, sp_pal, pixel_hi};
-                    end
-                    if (draw_x_base + 16'd1 < 16'd256 && pixel_lo != 4'hF) begin
-                        if (active_buf)
-                            line_a[draw_x_base[7:0] + 8'd1] <= {1'b1, 5'b0, 2'b01, sp_pal, pixel_lo};
-                        else
-                            line_b[draw_x_base[7:0] + 8'd1] <= {1'b1, 5'b0, 2'b01, sp_pal, pixel_lo};
-                    end
+                S_DRAW: begin
+                    if (dx < 16'd256 && pix_hi != 4'hF)
+                        write_back(dx[7:0], {1'b1, 5'd0, 2'b01, sp_pal, pix_hi});
+                    if (dx + 16'd1 < 16'd256 && pix_lo != 4'hF)
+                        write_back(dx[7:0] + 8'd1, {1'b1, 5'd0, 2'b01, sp_pal, pix_lo});
 
-                    // Advance within tile row (8 byte-pairs per 16-pixel-wide tile)
                     if (px_pair == 4'd7) begin
                         px_pair <= 4'd0;
                         if (tile_x == sp_w) begin
-                            // Done with this sprite — next
-                            if (sprite_idx == 8'd255)
-                                state <= ST_SWAP;
+                            if (spr_idx == 8'd255) state <= S_IDLE;
                             else begin
-                                sprite_idx   <= sprite_idx + 8'd1;
-                                spr_ram_addr <= 15'h4000 + {sprite_idx + 8'd1, 3'd0};
-                                state        <= ST_READ_EN;
+                                spr_idx      <= spr_idx + 8'd1;
+                                spr_ram_addr <= 15'h4000 + {spr_idx + 8'd1, 3'd0};
+                                state        <= S_RDEN;
                             end
                         end else
                             tile_x <= tile_x + 4'd1;
@@ -251,12 +216,7 @@ module sprite_line (
                         px_pair <= px_pair + 4'd1;
                 end
 
-                ST_SWAP: begin
-                    active_buf <= ~active_buf;
-                    state      <= ST_IDLE;
-                end
-
-                default: state <= ST_IDLE;
+                default: state <= S_IDLE;
             endcase
         end
     end

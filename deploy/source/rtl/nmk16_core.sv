@@ -7,12 +7,12 @@
 //
 // Internally the core still owns:
 //   - fx68k CPU instance
-//   - BG VRAM (16 KiB)
-//   - TX VRAM (2 KiB)
-//   - Palette RAM (2 KiB)
-//   - Work RAM (64 KiB)
-//   - Sprite framebuffer (256 × 224 × 16 bit)
-//   - tilemap, irq, sprite FSM
+//   - BG VRAM (16 KiB)   — true dual-port M10K, registered read
+//   - TX VRAM (2 KiB)    — true dual-port M10K, registered read
+//   - Palette RAM (2 KiB)— true dual-port M10K, registered read
+//   - Work RAM (64 KiB)  — true dual-port M10K, registered read
+//   - Sprite RAM shadow (2 KiB MLAB) DMA'd from wram on sprdma_trigger
+//   - tilemap, irq, sprite_line scanline renderer
 //
 // Memory still expected in top-level (wrapper):
 //   - Program ROM       256 KiB  (128 K × 16-bit words, BE)
@@ -163,15 +163,29 @@ module nmk16_core (
     wire lds_rising = ~lds_d & LDSn;
 
     // -----------------------------------------------------------------
-    // Internal RAMs
+    // Internal RAMs — true dual-port M10K with registered read.
+    //
+    // Without registered reads, Quartus drops the M10K hint (M10K has no
+    // async read port) and materialises every RAM as fabric registers + LUT
+    // mux. wram alone is 32768×16 = ~525k flip-flops, which is the root of
+    // the multi-GB / multi-hour synthesis blow-up. With registered reads,
+    // these infer cleanly as M10K block RAM.
     // -----------------------------------------------------------------
     (* ramstyle = "M10K" *) reg [15:0] wram   [0:32767];   // 64 KiB
     (* ramstyle = "M10K" *) reg [15:0] bgvram [0:8191];    // 16 KiB
     (* ramstyle = "M10K" *) reg [15:0] txvram [0:1023];    //  2 KiB
     (* ramstyle = "M10K" *) reg [15:0] palram [0:1023];    //  2 KiB
 
-    // Quartus infers M10K BRAMs initialized to 0 by default.
-    // Verilator needs explicit initialization.
+    reg [15:0] wram_rdata_cpu;       // port A: CPU read
+    reg [15:0] wram_rdata_dma;       // port B: sprite-RAM shadow DMA
+    reg [15:0] bgvram_rdata_cpu;     // port A: CPU
+    reg [15:0] bgvram_rdata_pix;     // port B: tilemap per-pixel
+    reg [15:0] txvram_rdata_cpu;     // port A: CPU
+    reg [15:0] txvram_rdata_pix;     // port B: tilemap per-pixel
+    reg [15:0] palram_rdata_cpu;     // port A: CPU
+    reg [15:0] palram_rdata_pix;     // port B: mixer
+
+    // Sim init — Quartus infers M10K cleared at config; sim needs it explicit.
     `ifdef VERILATOR
     integer ii;
     initial begin
@@ -235,27 +249,44 @@ module nmk16_core (
         end
     end
 
-    // VRAM / palette / WRAM writes
+    // RAM read+write blocks — one per port, structured the way Quartus
+    // recognises as M10K. Forward-referenced wires (bgvram_addr_t,
+    // txvram_addr_t, mix_idx, dma_wram_addr) are declared further down.
     always @(posedge clk) begin
-        if (!rst && !eRWn) begin
-            if (is_wram) begin
-                if (uds_rising) wram[wram_widx_cpu][15:8] <= oEdb[15:8];
-                if (lds_rising) wram[wram_widx_cpu][ 7:0] <= oEdb[ 7:0];
-            end
-            if (is_bgvram) begin
-                if (uds_rising) bgvram[bgvram_widx_cpu][15:8] <= oEdb[15:8];
-                if (lds_rising) bgvram[bgvram_widx_cpu][ 7:0] <= oEdb[ 7:0];
-            end
-            if (is_txvram) begin
-                if (uds_rising) txvram[txvram_widx_cpu][15:8] <= oEdb[15:8];
-                if (lds_rising) txvram[txvram_widx_cpu][ 7:0] <= oEdb[ 7:0];
-            end
-            if (is_pal) begin
-                if (uds_rising) palram[palram_widx_cpu][15:8] <= oEdb[15:8];
-                if (lds_rising) palram[palram_widx_cpu][ 7:0] <= oEdb[ 7:0];
-            end
+        if (!rst && !eRWn && is_wram) begin
+            if (uds_rising) wram[wram_widx_cpu][15:8] <= oEdb[15:8];
+            if (lds_rising) wram[wram_widx_cpu][ 7:0] <= oEdb[ 7:0];
         end
+        wram_rdata_cpu <= wram[wram_widx_cpu];
     end
+    always @(posedge clk) wram_rdata_dma <= wram[dma_wram_addr];
+
+    always @(posedge clk) begin
+        if (!rst && !eRWn && is_bgvram) begin
+            if (uds_rising) bgvram[bgvram_widx_cpu][15:8] <= oEdb[15:8];
+            if (lds_rising) bgvram[bgvram_widx_cpu][ 7:0] <= oEdb[ 7:0];
+        end
+        bgvram_rdata_cpu <= bgvram[bgvram_widx_cpu];
+    end
+    always @(posedge clk) bgvram_rdata_pix <= bgvram[bgvram_addr_t];
+
+    always @(posedge clk) begin
+        if (!rst && !eRWn && is_txvram) begin
+            if (uds_rising) txvram[txvram_widx_cpu][15:8] <= oEdb[15:8];
+            if (lds_rising) txvram[txvram_widx_cpu][ 7:0] <= oEdb[ 7:0];
+        end
+        txvram_rdata_cpu <= txvram[txvram_widx_cpu];
+    end
+    always @(posedge clk) txvram_rdata_pix <= txvram[txvram_addr_t];
+
+    always @(posedge clk) begin
+        if (!rst && !eRWn && is_pal) begin
+            if (uds_rising) palram[palram_widx_cpu][15:8] <= oEdb[15:8];
+            if (lds_rising) palram[palram_widx_cpu][ 7:0] <= oEdb[ 7:0];
+        end
+        palram_rdata_cpu <= palram[palram_widx_cpu];
+    end
+    always @(posedge clk) palram_rdata_pix <= palram[mix_idx];
 
     // I/O read mux
     reg [15:0] io_rd;
@@ -271,11 +302,14 @@ module nmk16_core (
         endcase
     end
 
+    // 1-cycle BRAM read latency — within fx68k bus-cycle slack at clk=96 MHz
+    // (CPU bus phase is ~16 clk; the same pattern is already used for
+    // prog_rom in the wrapper).
     assign iEdb = is_rom    ? prog_rom_data
-                : is_wram   ? wram[wram_widx_cpu]
-                : is_bgvram ? bgvram[bgvram_widx_cpu]
-                : is_txvram ? txvram[txvram_widx_cpu]
-                : is_pal    ? palram[palram_widx_cpu]
+                : is_wram   ? wram_rdata_cpu
+                : is_bgvram ? bgvram_rdata_cpu
+                : is_txvram ? txvram_rdata_cpu
+                : is_pal    ? palram_rdata_cpu
                 : is_io_lo  ? io_rd
                 :             16'hFFFF;
 
@@ -284,16 +318,14 @@ module nmk16_core (
     // -----------------------------------------------------------------
     wire [12:0] bgvram_addr_t;
     wire [9:0]  txvram_addr_t;
-    wire [15:0] bgvram_dout_t = bgvram[bgvram_addr_t];
-    wire [15:0] txvram_dout_t = txvram[txvram_addr_t];
     wire [3:0]  bg_color, bg_pal, tx_color, tx_pal;
     wire        bg_opaque_u, tx_opaque;
 
     tilemap u_tilemap (
         .clk_sys(clk), .rst(rst), .ce_pix(ce_pix),
         .hpos(hpos), .vpos(vpos), .flipscreen(flipscreen),
-        .bgvram_addr(bgvram_addr_t), .bgvram_din(bgvram_dout_t),
-        .txvram_addr(txvram_addr_t), .txvram_din(txvram_dout_t),
+        .bgvram_addr(bgvram_addr_t), .bgvram_din(bgvram_rdata_pix),
+        .txvram_addr(txvram_addr_t), .txvram_din(txvram_rdata_pix),
         .scroll_xh(scroll_xh), .scroll_xl(scroll_xl),
         .scroll_yh(scroll_yh), .scroll_yl(scroll_yl),
         .bgbank(bgbank),
@@ -304,121 +336,100 @@ module nmk16_core (
     );
 
     // -----------------------------------------------------------------
-    // Sprite engine — inline FSM walks 256 entries ×16 B from workram
+    // Sprite engine — scanline renderer (rtl/sprite_line.sv).
+    //
+    // The previous design had a 256×224×16-bit "frame buffer" array
+    // (~57k entries) read combinationally by the mixer. With async read,
+    // Quartus dropped the M10K hint and built it out of fabric registers
+    // — that single array dominated the synthesis blow-up.
+    //
+    // The scanline renderer keeps two 256×16 line buffers and walks
+    // sprite RAM once per scanline. Total state: 512 × 16 = 8 Kib, fits
+    // in two M10K blocks.
+    //
+    // Sprite RAM (CPU $F8000–$F8FFF, mirrored at wram[$4000..$47FF]) is
+    // shadowed into a 2 KiB MLAB on `sprdma_trigger` so the engine reads
+    // a stable copy while the CPU writes the next frame's table — this
+    // matches real NMK16 DMA timing.
     // -----------------------------------------------------------------
-    localparam int FB_W  = 256;
-    localparam int FB_H  = 224;
-    localparam int FB_SZ = FB_W * FB_H;
 
-    (* ramstyle = "M10K" *) reg [15:0] spr_fb [0:FB_SZ-1];
+    // ---- DMA shadow: wram[$4000..$47FF] → spr_ram_shadow ----
+    // MLAB ramstyle: async read so sprite_line's same-cycle data model
+    // works without modification. 2048×16 bits ≈ 64 MLAB cells — trivial.
+    (* ramstyle = "MLAB" *) reg [15:0] spr_ram_shadow [0:2047];
     `ifdef VERILATOR
-    integer jj;
-    initial for (jj = 0; jj < FB_SZ; jj = jj + 1) spr_fb[jj] = 16'h0000;
+    integer kk;
+    initial for (kk = 0; kk < 2048; kk = kk + 1) spr_ram_shadow[kk] = 16'h0000;
     `endif
 
-    localparam [2:0] S_IDLE  = 3'd0, S_CLEAR = 3'd1,
-                     S_READ  = 3'd2, S_DRAW  = 3'd3, S_NEXT = 3'd4;
+    reg        dma_busy;
+    reg [11:0] dma_rd_idx;     // 0..2048 (one extra to drain pipeline)
+    reg [10:0] dma_wr_idx;
+    reg        dma_wr_valid;
 
-    reg [2:0]  sp_state;
-    reg [15:0] clear_idx;
-    reg [7:0]  sprite_idx;
-    reg [8:0]  sp_x, sp_y;
-    reg [15:0] sp_code;
-    reg [3:0]  sp_pal, sp_w_tiles, sp_h_tiles;
-    reg [3:0]  tile_x_cnt, tile_y_cnt, px_x, px_y;
-
-    wire [15:0] cur_tile_code = sp_code
-                              + {12'd0, tile_y_cnt} * ({12'd0, sp_w_tiles} + 16'd1)
-                              + {12'd0, tile_x_cnt};
-    assign spr_gfx_addr = {cur_tile_code[12:0], px_x[3], px_y[3],
-                           px_y[2:0], px_x[2:1]};
-    wire [7:0]  cur_gfx_byte = spr_gfx_data;
-    wire [3:0]  cur_pixel    = px_x[0] ? cur_gfx_byte[3:0] : cur_gfx_byte[7:4];
-    wire        cur_opaque   = (cur_pixel != 4'hF);
-
-    wire [15:0] cur_screen_x_u = {7'd0, sp_x}
-                               + {8'd0, tile_x_cnt, 4'b0}
-                               + {12'd0, px_x};
-    wire [15:0] cur_screen_y_u = {7'd0, sp_y}
-                               + {8'd0, tile_y_cnt, 4'b0}
-                               + {12'd0, px_y};
-    wire        in_bounds     = (cur_screen_x_u < FB_W) &&
-                                (cur_screen_y_u < FB_H);
-    wire [15:0] fb_addr       = cur_screen_y_u * 16'(FB_W) + cur_screen_x_u;
-
-    wire [14:0] spr_src_base  = 15'h4000 + {sprite_idx, 3'b000};
-    wire [15:0] sp_word0 = wram[spr_src_base + 15'd0];
-    wire [15:0] sp_word1 = wram[spr_src_base + 15'd1];
-    wire [15:0] sp_word3 = wram[spr_src_base + 15'd3];
-    wire [15:0] sp_word4 = wram[spr_src_base + 15'd4];
-    wire [15:0] sp_word6 = wram[spr_src_base + 15'd6];
-    wire [15:0] sp_word7 = wram[spr_src_base + 15'd7];
-    wire sp_enabled = sp_word0[0];
+    // wram port-B address (sprite-RAM region: $4000 + idx)
+    wire [14:0] dma_wram_addr = {4'b0100, dma_rd_idx[10:0]};
 
     always @(posedge clk) begin
         if (rst) begin
-            sp_state   <= S_IDLE;
-            clear_idx  <= 16'd0;
-            sprite_idx <= 8'd0;
-            sp_x <= 9'd0; sp_y <= 9'd0; sp_code <= 16'd0; sp_pal <= 4'd0;
-            sp_w_tiles <= 4'd0; sp_h_tiles <= 4'd0;
-            tile_x_cnt <= 4'd0; tile_y_cnt <= 4'd0;
-            px_x <= 4'd0; px_y <= 4'd0;
+            dma_busy     <= 1'b0;
+            dma_rd_idx   <= 12'd0;
+            dma_wr_valid <= 1'b0;
         end else begin
-            case (sp_state)
-                S_IDLE:
-                    if (sprdma_trigger) begin sp_state <= S_CLEAR; clear_idx <= 16'd0; end
-                S_CLEAR: begin
-                    spr_fb[clear_idx] <= 16'h0000;
-                    if (clear_idx == 16'(FB_SZ-1)) begin
-                        sp_state <= S_READ; sprite_idx <= 8'd0;
-                    end else clear_idx <= clear_idx + 16'd1;
+            // Trigger pulse starts a copy if not already busy.
+            if (sprdma_trigger && !dma_busy) begin
+                dma_busy     <= 1'b1;
+                dma_rd_idx   <= 12'd0;
+                dma_wr_valid <= 1'b0;
+            end else if (dma_busy) begin
+                // wr_valid follows rd_idx with one cycle of latency to
+                // match the M10K read pipeline (addr → wram_rdata_dma).
+                dma_wr_idx   <= dma_rd_idx[10:0];
+                dma_wr_valid <= (dma_rd_idx < 12'd2048);
+
+                if (dma_rd_idx == 12'd2048) begin
+                    // Last entry written this cycle; done.
+                    dma_busy     <= 1'b0;
+                    dma_wr_valid <= 1'b0;
+                end else begin
+                    dma_rd_idx <= dma_rd_idx + 12'd1;
                 end
-                S_READ: begin
-                    sp_x <= sp_word4[8:0]; sp_y <= sp_word6[8:0];
-                    sp_code <= sp_word3; sp_pal <= sp_word7[3:0];
-                    sp_w_tiles <= sp_word1[3:0]; sp_h_tiles <= sp_word1[7:4];
-                    tile_x_cnt <= 4'd0; tile_y_cnt <= 4'd0;
-                    px_x <= 4'd0; px_y <= 4'd0;
-                    sp_state <= sp_enabled ? S_DRAW : S_NEXT;
-                end
-                S_DRAW: begin
-                    if (in_bounds && cur_opaque)
-                        spr_fb[fb_addr] <= {1'b1, 5'b0, 2'b01, sp_pal, cur_pixel};
-                    if (px_x != 4'd15) px_x <= px_x + 4'd1;
-                    else begin
-                        px_x <= 4'd0;
-                        if (px_y != 4'd15) px_y <= px_y + 4'd1;
-                        else begin
-                            px_y <= 4'd0;
-                            if (tile_x_cnt != sp_w_tiles) tile_x_cnt <= tile_x_cnt + 4'd1;
-                            else begin
-                                tile_x_cnt <= 4'd0;
-                                if (tile_y_cnt != sp_h_tiles) tile_y_cnt <= tile_y_cnt + 4'd1;
-                                else sp_state <= S_NEXT;
-                            end
-                        end
-                    end
-                end
-                S_NEXT:
-                    if (sprite_idx == 8'd255) sp_state <= S_IDLE;
-                    else begin sprite_idx <= sprite_idx + 8'd1; sp_state <= S_READ; end
-                default: sp_state <= S_IDLE;
-            endcase
+            end
         end
     end
+
+    // Shadow write — fed by registered wram_rdata_dma (1-cycle pipeline).
+    always @(posedge clk) begin
+        if (dma_wr_valid) spr_ram_shadow[dma_wr_idx] <= wram_rdata_dma;
+    end
+
+    // ---- sprite_line instance ----
+    wire [14:0] spr_ram_addr_w;
+    wire [15:0] spr_ram_data_w = spr_ram_shadow[spr_ram_addr_w[10:0]];
+    wire [9:0]  spr_pal_idx_px;
+    wire        spr_opaque_px;
+
+    sprite_line u_sprite (
+        .clk          (clk),
+        .rst          (rst),
+        .ce_pix       (ce_pix),
+        .hpos         (hpos),
+        .vpos         (vpos),
+        .spr_ram_addr (spr_ram_addr_w),
+        .spr_ram_data (spr_ram_data_w),
+        .spr_gfx_addr (spr_gfx_addr),
+        .spr_gfx_data (spr_gfx_data),
+        .spr_pal_idx  (spr_pal_idx_px),
+        .spr_opaque   (spr_opaque_px)
+    );
 
     // -----------------------------------------------------------------
     // Mixer + palette lookup → vga_r/g/b
     // -----------------------------------------------------------------
-    wire [11:0] screen_x = {3'b0, hpos} - 12'd92;
-    wire [11:0] screen_y = {3'b0, vpos} - 12'd16;
-    wire        in_active = (screen_x < 12'(FB_W)) && (screen_y < 12'(FB_H));
-    wire [15:0] spr_fb_addr2 = screen_y[7:0] * 16'(FB_W) + {8'd0, screen_x[7:0]};
-    wire [15:0] spr_px = in_active ? spr_fb[spr_fb_addr2] : 16'h0000;
-    wire        spr_opaque_px = spr_px[15];
-    wire [9:0]  spr_pal_idx_px= spr_px[9:0];
-
+    // Sprite output (spr_pal_idx_px / spr_opaque_px) comes from sprite_line
+    // above. Palette read goes through the registered palram_rdata_pix port
+    // (1-cycle latency), so vga_r/g/b lag the mix index by one master clock
+    // — well within ce_pix slack at PIX_DIV=16.
     wire [9:0] bg_pal_idx = {2'b00, bg_pal, bg_color};
     wire [9:0] tx_pal_idx = {2'b10, tx_pal, tx_color};
     wire [9:0] mix_idx    = tx_opaque     ? tx_pal_idx
@@ -426,7 +437,7 @@ module nmk16_core (
                           :                 bg_pal_idx;
     wire       active     = ~vblank_w & ~hblank_w;
 
-    wire [15:0] pal_word = palram[mix_idx];
+    wire [15:0] pal_word = palram_rdata_pix;
     wire [4:0] r5 = {pal_word[15:12], pal_word[3]};
     wire [4:0] g5 = {pal_word[11: 8], pal_word[2]};
     wire [4:0] b5 = {pal_word[ 7: 4], pal_word[1]};

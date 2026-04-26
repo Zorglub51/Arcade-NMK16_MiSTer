@@ -6,6 +6,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE NMK16.sv
 # Core RTL
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/nmk16_core.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/tilemap.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/sprite_line.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/irq.sv
 
 # SDRAM controller + ioctl-to-SDRAM loader (Phase 7 v2a)
