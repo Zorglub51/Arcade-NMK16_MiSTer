@@ -213,22 +213,26 @@ assign prog_rom_data = prog_rom_reg;
 // ioctl writes, and bitstream fit all work, before committing to the more
 // invasive tilemap pipeline changes needed to read during active scan.
 
-wire [19:0] bg_gfx_addr;
-wire [16:0] tx_gfx_addr;
+// v2b: all three GFX read ports go through sdram.sv. Layers emit byte offsets
+// within their respective ROM; the wrapper ORs in the SDRAM base address that
+// gfx_loader uses (TX=0x100000, BG=0x200000, sprite=0x400000).
+wire        bg_gfx_req;
+wire        bg_gfx_ack;
+wire [23:0] bg_gfx_addr;
+wire [15:0] bg_gfx_data;
+wire        bg_gfx_valid;
+wire [23:0] sdram_bg_addr = bg_gfx_addr | 24'h200000;
 
-// v2a: BG/TX still see 0 on gfx data — bg_layer/tx_layer refactor pending.
-wire [7:0] bg_gfx_data  = 8'h00;
-wire [7:0] tx_gfx_data  = 8'h00;
+wire        tx_gfx_req;
+wire        tx_gfx_ack;
+wire [23:0] tx_gfx_addr;
+wire [15:0] tx_gfx_data;
+wire        tx_gfx_valid;
+wire [23:0] sdram_tx_addr = tx_gfx_addr | 24'h100000;
 
-// v2b sprite: real SDRAM read port (req/valid). Core does its own line-buffer
-// rendering, so SDRAM latency is invisible to the mixer.
-//
-// Address mapping: sprite_line emits a byte offset within the 1 MiB sprite
-// ROM (0..0xFFFFF). gfx_loader places sprite GFX at SDRAM base 0x400000, so
-// we OR the base in here.
 wire        spr_gfx_req;
 wire        spr_gfx_ack;
-wire [23:0] spr_gfx_addr;          // sprite-ROM-relative (output of nmk16_core)
+wire [23:0] spr_gfx_addr;
 wire [15:0] spr_gfx_data;
 wire        spr_gfx_valid;
 wire [23:0] sdram_spr_addr = spr_gfx_addr | 24'h400000;
@@ -278,17 +282,17 @@ sdram u_sdram (
     .wr_data    (sdram_wr_data),
     .wr_be      (sdram_wr_be),
 
-    .bg_req     (1'b0),
-    .bg_ack     (),
-    .bg_addr    (24'h0),
-    .bg_data    (),
-    .bg_valid   (),
+    .bg_req     (bg_gfx_req),
+    .bg_ack     (bg_gfx_ack),
+    .bg_addr    (sdram_bg_addr),
+    .bg_data    (bg_gfx_data),
+    .bg_valid   (bg_gfx_valid),
 
-    .tx_req     (1'b0),
-    .tx_ack     (),
-    .tx_addr    (24'h0),
-    .tx_data    (),
-    .tx_valid   (),
+    .tx_req     (tx_gfx_req),
+    .tx_ack     (tx_gfx_ack),
+    .tx_addr    (sdram_tx_addr),
+    .tx_data    (tx_gfx_data),
+    .tx_valid   (tx_gfx_valid),
 
     .spr_req    (spr_gfx_req),
     .spr_ack    (spr_gfx_ack),
@@ -346,10 +350,16 @@ nmk16_core u_core (
 
     .prog_rom_addr  (prog_rom_addr),
     .prog_rom_data  (prog_rom_data),
+    .bg_gfx_req     (bg_gfx_req),
+    .bg_gfx_ack     (bg_gfx_ack),
     .bg_gfx_addr    (bg_gfx_addr),
     .bg_gfx_data    (bg_gfx_data),
+    .bg_gfx_valid   (bg_gfx_valid),
+    .tx_gfx_req     (tx_gfx_req),
+    .tx_gfx_ack     (tx_gfx_ack),
     .tx_gfx_addr    (tx_gfx_addr),
     .tx_gfx_data    (tx_gfx_data),
+    .tx_gfx_valid   (tx_gfx_valid),
     .spr_gfx_req    (spr_gfx_req),
     .spr_gfx_ack    (spr_gfx_ack),
     .spr_gfx_addr   (spr_gfx_addr),

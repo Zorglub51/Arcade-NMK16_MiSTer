@@ -5,7 +5,8 @@ set_global_assignment -name SYSTEMVERILOG_FILE NMK16.sv
 
 # Core RTL
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/nmk16_core.sv
-set_global_assignment -name SYSTEMVERILOG_FILE rtl/tilemap.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/bg_layer.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/tx_layer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/sprite_line.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/irq.sv
 

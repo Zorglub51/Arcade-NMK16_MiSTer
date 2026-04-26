@@ -296,30 +296,87 @@ module nmk16_phase4_top (
                 :             16'hFFFF;
 
     // -----------------------------------------------------------------
-    // Tilemap engine (BG + TX), same as Phase 3
+    // BG layer — req/valid GFX through gfx_rom_port (sim SDRAM proxy).
     // -----------------------------------------------------------------
     wire [12:0] bgvram_addr_t;
-    wire [9:0]  txvram_addr_t;
-    wire [19:0] bg_gfx_addr_t;
-    wire [16:0] tx_gfx_addr_t;
     wire [15:0] bgvram_dout_t = bgvram[bgvram_addr_t];
-    wire [15:0] txvram_dout_t = txvram[txvram_addr_t];
-    wire [7:0]  bg_gfx_dout_t = bg_gfx[bg_gfx_addr_t];
-    wire [7:0]  tx_gfx_dout_t = tx_gfx[tx_gfx_addr_t];
-    wire [3:0]  bg_color, bg_pal, tx_color, tx_pal;
-    wire        bg_opaque_u, tx_opaque;
+    wire        bg_gfx_req;
+    wire        bg_gfx_ack;
+    wire [23:0] bg_gfx_addr_w;
+    wire [15:0] bg_gfx_data_w;
+    wire        bg_gfx_valid;
+    wire [23:0] bg_rom_addr_out;
+    wire [19:0] bg_rom_idx     = bg_rom_addr_out[19:0];
+    wire [7:0]  bg_byte_hi     = bg_gfx[{bg_rom_idx[19:1], 1'b0}];
+    wire [7:0]  bg_byte_lo     = bg_gfx[{bg_rom_idx[19:1], 1'b1}];
+    wire [15:0] bg_rom_word_in = {bg_byte_hi, bg_byte_lo};
 
-    tilemap u_tilemap (
-        .clk_sys(clk), .rst(rst), .ce_pix(ce_pix),
-        .hpos(hpos_w), .vpos(vpos_w), .flipscreen(flipscreen),
-        .bgvram_addr(bgvram_addr_t), .bgvram_din(bgvram_dout_t),
-        .txvram_addr(txvram_addr_t), .txvram_din(txvram_dout_t),
+    gfx_rom_port #(.LATENCY(6)) u_bg_port (
+        .clk(clk), .rst(rst),
+        .req(bg_gfx_req), .ack(bg_gfx_ack),
+        .addr(bg_gfx_addr_w),
+        .data(bg_gfx_data_w), .valid(bg_gfx_valid),
+        .rom_addr_out(bg_rom_addr_out),
+        .rom_word_in(bg_rom_word_in)
+    );
+
+    wire [3:0] bg_color, bg_pal;
+    wire       bg_opaque_u;
+
+    bg_layer u_bg (
+        .clk(clk), .rst(rst), .ce_pix(ce_pix),
+        .hpos(hpos_w), .vpos(vpos_w),
         .scroll_xh(scroll_xh), .scroll_xl(scroll_xl),
         .scroll_yh(scroll_yh), .scroll_yl(scroll_yl),
         .bgbank(bgbank),
-        .bg_gfx_addr(bg_gfx_addr_t), .bg_gfx_din(bg_gfx_dout_t),
-        .tx_gfx_addr(tx_gfx_addr_t), .tx_gfx_din(tx_gfx_dout_t),
-        .bg_color(bg_color), .bg_pal(bg_pal), .bg_opaque(bg_opaque_u),
+        .bgvram_addr(bgvram_addr_t),
+        .bgvram_din (bgvram_dout_t),
+        .gfx_req    (bg_gfx_req),
+        .gfx_ack    (bg_gfx_ack),
+        .gfx_addr   (bg_gfx_addr_w),
+        .gfx_data   (bg_gfx_data_w),
+        .gfx_valid  (bg_gfx_valid),
+        .bg_color(bg_color), .bg_pal(bg_pal), .bg_opaque(bg_opaque_u)
+    );
+
+    // -----------------------------------------------------------------
+    // TX layer — same shape, smaller addr space (128 KiB).
+    // -----------------------------------------------------------------
+    wire [9:0]  txvram_addr_t;
+    wire [15:0] txvram_dout_t = txvram[txvram_addr_t];
+    wire        tx_gfx_req;
+    wire        tx_gfx_ack;
+    wire [23:0] tx_gfx_addr_w;
+    wire [15:0] tx_gfx_data_w;
+    wire        tx_gfx_valid;
+    wire [23:0] tx_rom_addr_out;
+    wire [16:0] tx_rom_idx     = tx_rom_addr_out[16:0];
+    wire [7:0]  tx_byte_hi     = tx_gfx[{tx_rom_idx[16:1], 1'b0}];
+    wire [7:0]  tx_byte_lo     = tx_gfx[{tx_rom_idx[16:1], 1'b1}];
+    wire [15:0] tx_rom_word_in = {tx_byte_hi, tx_byte_lo};
+
+    gfx_rom_port #(.LATENCY(6)) u_tx_port (
+        .clk(clk), .rst(rst),
+        .req(tx_gfx_req), .ack(tx_gfx_ack),
+        .addr(tx_gfx_addr_w),
+        .data(tx_gfx_data_w), .valid(tx_gfx_valid),
+        .rom_addr_out(tx_rom_addr_out),
+        .rom_word_in(tx_rom_word_in)
+    );
+
+    wire [3:0] tx_color, tx_pal;
+    wire       tx_opaque;
+
+    tx_layer u_tx (
+        .clk(clk), .rst(rst), .ce_pix(ce_pix),
+        .hpos(hpos_w), .vpos(vpos_w),
+        .txvram_addr(txvram_addr_t),
+        .txvram_din (txvram_dout_t),
+        .gfx_req   (tx_gfx_req),
+        .gfx_ack   (tx_gfx_ack),
+        .gfx_addr  (tx_gfx_addr_w),
+        .gfx_data  (tx_gfx_data_w),
+        .gfx_valid (tx_gfx_valid),
         .tx_color(tx_color), .tx_pal(tx_pal), .tx_opaque(tx_opaque)
     );
 
@@ -430,7 +487,7 @@ module nmk16_phase4_top (
     wire [9:0] bg_pal_idx = {2'b00, bg_pal, bg_color};
     wire [9:0] tx_pal_idx = {2'b10, tx_pal, tx_color};
     wire [9:0] mix_idx    = tx_opaque     ? tx_pal_idx
-                          : 1'b0 ? spr_pal_idx_px
+                          : spr_opaque_px ? spr_pal_idx_px
                           :                 bg_pal_idx;
     wire       active     = ~vblank_w & ~hblank_w;
 

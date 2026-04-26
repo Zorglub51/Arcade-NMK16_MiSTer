@@ -42,12 +42,17 @@ module nmk16_core (
     output wire [16:0] prog_rom_addr,    // 128K word index
     input  wire [15:0] prog_rom_data,
 
-    // ------------- GFX ROM read ports -------------
-    output wire [19:0] bg_gfx_addr,      // 1 MiB
-    input  wire [7:0]  bg_gfx_data,
-    output wire [16:0] tx_gfx_addr,      // 128 KiB
-    input  wire [7:0]  tx_gfx_data,
-    // Sprite GFX: req/valid (matches one channel of sdram.sv).
+    // ------------- GFX ROM read ports (req/valid; one channel each) -------------
+    output wire        bg_gfx_req,
+    input  wire        bg_gfx_ack,
+    output wire [23:0] bg_gfx_addr,
+    input  wire [15:0] bg_gfx_data,
+    input  wire        bg_gfx_valid,
+    output wire        tx_gfx_req,
+    input  wire        tx_gfx_ack,
+    output wire [23:0] tx_gfx_addr,
+    input  wire [15:0] tx_gfx_data,
+    input  wire        tx_gfx_valid,
     output wire        spr_gfx_req,
     input  wire        spr_gfx_ack,
     output wire [23:0] spr_gfx_addr,
@@ -318,24 +323,39 @@ module nmk16_core (
                 :             16'hFFFF;
 
     // -----------------------------------------------------------------
-    // Tilemap (BG + TX)
+    // BG + TX layers — pipelined req/valid GFX through SDRAM
     // -----------------------------------------------------------------
     wire [12:0] bgvram_addr_t;
     wire [9:0]  txvram_addr_t;
     wire [3:0]  bg_color, bg_pal, tx_color, tx_pal;
     wire        bg_opaque_u, tx_opaque;
 
-    tilemap u_tilemap (
-        .clk_sys(clk), .rst(rst), .ce_pix(ce_pix),
-        .hpos(hpos), .vpos(vpos), .flipscreen(flipscreen),
-        .bgvram_addr(bgvram_addr_t), .bgvram_din(bgvram_rdata_pix),
-        .txvram_addr(txvram_addr_t), .txvram_din(txvram_rdata_pix),
+    bg_layer u_bg (
+        .clk(clk), .rst(rst), .ce_pix(ce_pix),
+        .hpos(hpos), .vpos(vpos),
         .scroll_xh(scroll_xh), .scroll_xl(scroll_xl),
         .scroll_yh(scroll_yh), .scroll_yl(scroll_yl),
         .bgbank(bgbank),
-        .bg_gfx_addr(bg_gfx_addr), .bg_gfx_din(bg_gfx_data),
-        .tx_gfx_addr(tx_gfx_addr), .tx_gfx_din(tx_gfx_data),
-        .bg_color(bg_color), .bg_pal(bg_pal), .bg_opaque(bg_opaque_u),
+        .bgvram_addr(bgvram_addr_t),
+        .bgvram_din (bgvram_rdata_pix),
+        .gfx_req    (bg_gfx_req),
+        .gfx_ack    (bg_gfx_ack),
+        .gfx_addr   (bg_gfx_addr),
+        .gfx_data   (bg_gfx_data),
+        .gfx_valid  (bg_gfx_valid),
+        .bg_color(bg_color), .bg_pal(bg_pal), .bg_opaque(bg_opaque_u)
+    );
+
+    tx_layer u_tx (
+        .clk(clk), .rst(rst), .ce_pix(ce_pix),
+        .hpos(hpos), .vpos(vpos),
+        .txvram_addr(txvram_addr_t),
+        .txvram_din (txvram_rdata_pix),
+        .gfx_req    (tx_gfx_req),
+        .gfx_ack    (tx_gfx_ack),
+        .gfx_addr   (tx_gfx_addr),
+        .gfx_data   (tx_gfx_data),
+        .gfx_valid  (tx_gfx_valid),
         .tx_color(tx_color), .tx_pal(tx_pal), .tx_opaque(tx_opaque)
     );
 
