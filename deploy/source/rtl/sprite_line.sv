@@ -5,9 +5,13 @@
 //   - 'front' register selects which the mixer reads; engine writes the other.
 //   - On each vpos change: swap front, clear the new back buffer, walk sprites.
 //   - Engine writes are latched to the back buffer determined at swap time.
-//   - No generation counter — explicit 256-cycle clear. Budget: ~1500 cycles
-//     for sprites + 256 clear = ~1756. At PIX_DIV=4 budget is 1536 — tight
-//     but sprites that don't finish are simply clipped (partial rendering, no desync).
+//
+// GFX ROM interface (v2b): request/valid protocol, same as one channel of
+// rtl/sdram.sv. The engine issues a read per byte-address, waits for
+// `spr_gfx_valid`, and extracts the byte from the 16-bit SDRAM word using
+// the address LSB. This lets the engine sit behind a multi-cycle SDRAM
+// arbiter without losing fidelity — the line buffer absorbs latency
+// variance, so the mixer never sees it.
 
 `default_nettype none
 
@@ -21,8 +25,12 @@ module sprite_line (
     output reg  [14:0] spr_ram_addr,
     input  wire [15:0] spr_ram_data,
 
-    output wire [19:0] spr_gfx_addr,
-    input  wire [7:0]  spr_gfx_data,
+    // GFX ROM read port (req/valid; data is 16-bit word, byte selected by addr[0])
+    output reg         spr_gfx_req,
+    input  wire        spr_gfx_ack,
+    output reg  [23:0] spr_gfx_addr,
+    input  wire [15:0] spr_gfx_data,
+    input  wire        spr_gfx_valid,
 
     output wire [9:0]  spr_pal_idx,
     output wire        spr_opaque
@@ -47,15 +55,17 @@ module sprite_line (
     // -----------------------------------------------------------------
     // Engine FSM
     // -----------------------------------------------------------------
-    localparam [2:0]
-        S_IDLE  = 3'd0,
-        S_CLEAR = 3'd1,
-        S_RDEN  = 3'd2,
-        S_ATTR  = 3'd3,
-        S_CHKY  = 3'd4,
-        S_DRAW  = 3'd5;
+    localparam [3:0]
+        S_IDLE      = 4'd0,
+        S_CLEAR     = 4'd1,
+        S_RDEN      = 4'd2,
+        S_ATTR      = 4'd3,
+        S_CHKY      = 4'd4,
+        S_DRAW_REQ  = 4'd5,
+        S_DRAW_WAIT = 4'd6,
+        S_DRAW_DO   = 4'd7;
 
-    reg [2:0]  state;
+    reg [3:0]  state;
     reg [7:0]  clr_idx;
     reg [7:0]  spr_idx;
     reg [2:0]  attr_step;
@@ -64,6 +74,7 @@ module sprite_line (
     reg [3:0]  sp_pal, sp_w, sp_h;
     reg [3:0]  tile_x, px_pair;
     reg [8:0]  screen_y;  // screen-space Y for this fill (0..223)
+    reg [7:0]  pix_byte;   // captured byte from spr_gfx_data
 
     // Detect vpos change (1 cycle after irq.sv updates vpos via NBA)
     reg [8:0] prev_vpos;
@@ -73,16 +84,18 @@ module sprite_line (
     wire [15:0] spr_bot = {7'd0, sp_y} + {8'd0, sp_h, 4'b0} + 16'd15;
     wire [8:0]  row_in  = screen_y - sp_y;
 
-    // GFX address for current pixel pair
+    // GFX byte address for current pixel pair (computed combinationally;
+    // captured into spr_gfx_addr at S_DRAW_REQ entry).
     wire [15:0] tile_code = sp_code
                           + {12'd0, row_in[7:4]} * ({12'd0, sp_w} + 16'd1)
                           + {12'd0, tile_x};
-    wire [3:0] sy = row_in[3:0];
-    wire [3:0] sx = {px_pair, 1'b0};
-    assign spr_gfx_addr = {tile_code[12:0], sx[3], sy[3], sy[2:0], sx[2:1]};
+    wire [3:0]  sy = row_in[3:0];
+    wire [3:0]  sx = {px_pair, 1'b0};
+    wire [19:0] gfx_byte_addr_next = {tile_code[12:0], sx[3], sy[3], sy[2:0], sx[2:1]};
 
-    wire [3:0] pix_hi = spr_gfx_data[7:4];
-    wire [3:0] pix_lo = spr_gfx_data[3:0];
+    // Pixels extracted from the captured byte (after spr_gfx_valid)
+    wire [3:0] pix_hi = pix_byte[7:4];
+    wire [3:0] pix_lo = pix_byte[3:0];
     wire [15:0] dx = {7'd0, sp_x} + {8'd0, tile_x, 4'b0} + {12'd0, px_pair, 1'b0};
 
     // Write one pixel to back buffer
@@ -105,7 +118,13 @@ module sprite_line (
             sp_pal <= 0; sp_w <= 0; sp_h <= 0;
             tile_x <= 0; px_pair <= 0;
             spr_ram_addr <= 15'd0;
+            spr_gfx_req  <= 1'b0;
+            spr_gfx_addr <= 24'd0;
+            pix_byte     <= 8'd0;
         end else begin
+            // Default: gfx_req drops after one cycle (or when ack pulses).
+            if (spr_gfx_ack) spr_gfx_req <= 1'b0;
+
             prev_vpos <= vpos;
 
             // ---- SWAP on every scanline boundary ----
@@ -184,7 +203,7 @@ module sprite_line (
                         {7'd0, screen_y} <= spr_bot) begin
                         tile_x  <= 4'd0;
                         px_pair <= 4'd0;
-                        state   <= S_DRAW;
+                        state   <= S_DRAW_REQ;
                     end else begin
                         if (spr_idx == 8'd255) state <= S_IDLE;
                         else begin
@@ -195,7 +214,25 @@ module sprite_line (
                     end
                 end
 
-                S_DRAW: begin
+                S_DRAW_REQ: begin
+                    // Issue GFX read for the current pixel pair.
+                    spr_gfx_addr <= {4'd0, gfx_byte_addr_next};
+                    spr_gfx_req  <= 1'b1;
+                    state        <= S_DRAW_WAIT;
+                end
+
+                S_DRAW_WAIT: begin
+                    // Wait for the SDRAM read to come back. Latency depends
+                    // on arbitration; line buffer absorbs variance.
+                    if (spr_gfx_valid) begin
+                        // 16-bit data is {byte at addr&~1, byte at addr|1}.
+                        pix_byte <= spr_gfx_addr[0] ? spr_gfx_data[7:0]
+                                                   : spr_gfx_data[15:8];
+                        state    <= S_DRAW_DO;
+                    end
+                end
+
+                S_DRAW_DO: begin
                     if (dx < 16'd256 && pix_hi != 4'hF)
                         write_back(dx[7:0], {1'b1, 5'd0, 2'b01, sp_pal, pix_hi});
                     if (dx + 16'd1 < 16'd256 && pix_lo != 4'hF)
@@ -210,10 +247,14 @@ module sprite_line (
                                 spr_ram_addr <= 15'h4000 + {spr_idx + 8'd1, 3'd0};
                                 state        <= S_RDEN;
                             end
-                        end else
+                        end else begin
                             tile_x <= tile_x + 4'd1;
-                    end else
+                            state  <= S_DRAW_REQ;
+                        end
+                    end else begin
                         px_pair <= px_pair + 4'd1;
+                        state   <= S_DRAW_REQ;
+                    end
                 end
 
                 default: state <= S_IDLE;

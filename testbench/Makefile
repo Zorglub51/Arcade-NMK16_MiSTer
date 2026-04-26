@@ -148,7 +148,8 @@ run_phase3: phase3
 # Phase 4 — adds sprite engine on top of Phase 3.
 # ----------------------------------------------------------------------
 P4_MODULE   = nmk16_phase4_top
-P4_RTL_SRC  = $(TB_DIR)/$(P4_MODULE).sv $(RTL_DIR)/irq.sv $(RTL_DIR)/tilemap.sv $(RTL_DIR)/sprite_line.sv \
+P4_RTL_SRC  = $(TB_DIR)/$(P4_MODULE).sv $(TB_DIR)/gfx_rom_port.sv \
+              $(RTL_DIR)/irq.sv $(RTL_DIR)/tilemap.sv $(RTL_DIR)/sprite_line.sv \
               $(RTL_DIR)/cpu/fx68k/fx68k.sv \
               $(RTL_DIR)/cpu/fx68k/fx68kAlu.sv $(RTL_DIR)/cpu/fx68k/uaddrPla.sv
 P4_SIM_SRC  = $(TB_DIR)/nmk16_phase4_main.cpp
@@ -190,7 +191,7 @@ run_phase4: phase4
 P4SDL_SIM_SRC = $(TB_DIR)/nmk16_phase4_sdl.cpp
 P4SDL_VFLAGS  = --cc --exe --build --no-assert --savable \
                 -Wall -O3 --x-assign fast --x-initial fast \
-                +define+PIX_DIV_VAL=4 \
+                +define+PIX_DIV_VAL=16 \
                 +define+ROM_BIN=\"$(ROM_BIN_F)\" \
                 +define+BG_GFX_BIN=\"$(BG_GFX_BIN)\" \
                 +define+TX_GFX_BIN=\"$(TX_GFX_BIN)\" \

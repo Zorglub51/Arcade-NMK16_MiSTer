@@ -47,8 +47,12 @@ module nmk16_core (
     input  wire [7:0]  bg_gfx_data,
     output wire [16:0] tx_gfx_addr,      // 128 KiB
     input  wire [7:0]  tx_gfx_data,
-    output wire [19:0] spr_gfx_addr,     // 1 MiB
-    input  wire [7:0]  spr_gfx_data,
+    // Sprite GFX: req/valid (matches one channel of sdram.sv).
+    output wire        spr_gfx_req,
+    input  wire        spr_gfx_ack,
+    output wire [23:0] spr_gfx_addr,
+    input  wire [15:0] spr_gfx_data,
+    input  wire        spr_gfx_valid,
 
     // ------------- video out -------------
     output wire        ce_pix,           // 6 MHz when master = 96 MHz, PIX_DIV=16
@@ -417,8 +421,11 @@ module nmk16_core (
         .vpos         (vpos),
         .spr_ram_addr (spr_ram_addr_w),
         .spr_ram_data (spr_ram_data_w),
+        .spr_gfx_req  (spr_gfx_req),
+        .spr_gfx_ack  (spr_gfx_ack),
         .spr_gfx_addr (spr_gfx_addr),
         .spr_gfx_data (spr_gfx_data),
+        .spr_gfx_valid(spr_gfx_valid),
         .spr_pal_idx  (spr_pal_idx_px),
         .spr_opaque   (spr_opaque_px)
     );

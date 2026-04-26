@@ -215,12 +215,18 @@ assign prog_rom_data = prog_rom_reg;
 
 wire [19:0] bg_gfx_addr;
 wire [16:0] tx_gfx_addr;
-wire [19:0] spr_gfx_addr;
 
-// v2a: core still sees 0 on gfx data. v2b replaces these.
+// v2a: BG/TX still see 0 on gfx data — bg_layer/tx_layer refactor pending.
 wire [7:0] bg_gfx_data  = 8'h00;
 wire [7:0] tx_gfx_data  = 8'h00;
-wire [7:0] spr_gfx_data = 8'h00;
+
+// v2b sprite: real SDRAM read port (req/valid). Core does its own line-buffer
+// rendering, so SDRAM latency is invisible to the mixer.
+wire        spr_gfx_req;
+wire        spr_gfx_ack;
+wire [23:0] spr_gfx_addr;
+wire [15:0] spr_gfx_data;
+wire        spr_gfx_valid;
 
 // --- SDRAM write port (driven by gfx_loader) ---
 wire        sdram_wr_req;
@@ -279,11 +285,11 @@ sdram u_sdram (
     .tx_data    (),
     .tx_valid   (),
 
-    .spr_req    (1'b0),
-    .spr_ack    (),
-    .spr_addr   (24'h0),
-    .spr_data   (),
-    .spr_valid  ()
+    .spr_req    (spr_gfx_req),
+    .spr_ack    (spr_gfx_ack),
+    .spr_addr   (spr_gfx_addr),
+    .spr_data   (spr_gfx_data),
+    .spr_valid  (spr_gfx_valid)
 );
 
 ////////////////////////// Joystick → NMK16 inputs //////////////////////////
@@ -339,8 +345,11 @@ nmk16_core u_core (
     .bg_gfx_data    (bg_gfx_data),
     .tx_gfx_addr    (tx_gfx_addr),
     .tx_gfx_data    (tx_gfx_data),
+    .spr_gfx_req    (spr_gfx_req),
+    .spr_gfx_ack    (spr_gfx_ack),
     .spr_gfx_addr   (spr_gfx_addr),
     .spr_gfx_data   (spr_gfx_data),
+    .spr_gfx_valid  (spr_gfx_valid),
 
     .ce_pix         (core_ce_pix),
     .hpos           (core_hpos),

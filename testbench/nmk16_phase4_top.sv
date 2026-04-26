@@ -325,14 +325,85 @@ module nmk16_phase4_top (
 
 
     // -----------------------------------------------------------------
-    // Sprite engine — scanline renderer with double-buffered line buffer.
-    // Replaces the 57K-entry framebuffer with two 256-entry line buffers.
-    // Matches real NMK16 hardware: per-scanline sprite list walk.
+    // Sprite DMA — real NMK16 2-stage chain, triggered at line 242.
+    //
+    // Real hardware has two 4 KiB internal buffers:
+    //   sprdma_trigger → old2 ← old, old ← mainram[$F8000]
+    //   Renderer reads from old2 (data is 2 frames old).
+    //
+    // The chain copy means sprites are displayed with a 2-frame delay,
+    // matching the original arcade timing. The CPU writes to mainram
+    // during VBLANK; DMA copies to old; next frame's DMA copies old→old2;
+    // renderer uses old2 during the frame after that.
+    // -----------------------------------------------------------------
+    reg [15:0] spr_old  [0:2047];     // "old"  — most recent DMA copy
+    reg [15:0] spr_old2 [0:2047];     // "old2" — the one the renderer reads
+    reg spr_dma_busy;
+    reg [10:0] spr_dma_idx;
+    reg        spr_dma_phase;         // 0 = copying old2←old, 1 = copying old←mainram
+
+    always @(posedge clk) begin
+        if (rst) begin
+            spr_dma_busy  <= 1'b0;
+            spr_dma_idx   <= 11'd0;
+            spr_dma_phase <= 1'b0;
+        end else if (sprdma_trigger && !spr_dma_busy) begin
+            spr_dma_busy  <= 1'b1;
+            spr_dma_idx   <= 11'd0;
+            spr_dma_phase <= 1'b0;         // phase 0: old2 ← old
+        end else if (spr_dma_busy) begin
+            if (spr_dma_phase == 1'b0) begin
+                // Phase 0: old2 ← old
+                spr_old2[spr_dma_idx] <= spr_old[spr_dma_idx];
+                if (spr_dma_idx == 11'd2047) begin
+                    spr_dma_idx   <= 11'd0;
+                    spr_dma_phase <= 1'b1;     // switch to phase 1
+                end else
+                    spr_dma_idx <= spr_dma_idx + 11'd1;
+            end else begin
+                // Phase 1: old ← mainram
+                spr_old[spr_dma_idx] <= wram[15'h4000 + spr_dma_idx[10:0]];
+                if (spr_dma_idx == 11'd2047)
+                    spr_dma_busy <= 1'b0;
+                else
+                    spr_dma_idx <= spr_dma_idx + 11'd1;
+            end
+        end
+    end
+
+    // -----------------------------------------------------------------
+    // Sprite engine — scanline renderer reads from old2 (2-frame-old data).
+    // GFX ROM goes through gfx_rom_port: same req/valid protocol as
+    // rtl/sdram.sv, so sprite_line can run unchanged on real hardware.
     // -----------------------------------------------------------------
     wire [14:0] spr_ram_addr;
-    wire [15:0] spr_ram_data = wram[spr_ram_addr];
-    wire [19:0] spr_gfx_addr_w;
-    wire [7:0]  spr_gfx_data_w = spr_gfx[spr_gfx_addr_w];
+    wire [15:0] spr_ram_data = spr_old2[spr_ram_addr - 15'h4000];
+
+    wire        spr_gfx_req;
+    wire        spr_gfx_ack;
+    wire [23:0] spr_gfx_addr_w;
+    wire [15:0] spr_gfx_data_w;
+    wire        spr_gfx_valid;
+
+    // Backing-store side: testbench reads the byte array at the latched address.
+    wire [23:0] spr_rom_addr_out;
+    wire [19:0] spr_rom_idx     = spr_rom_addr_out[19:0];
+    wire [7:0]  spr_byte_hi     = spr_gfx[{spr_rom_idx[19:1], 1'b0}];
+    wire [7:0]  spr_byte_lo     = spr_gfx[{spr_rom_idx[19:1], 1'b1}];
+    wire [15:0] spr_rom_word_in = {spr_byte_hi, spr_byte_lo};
+
+    gfx_rom_port #(.LATENCY(6)) u_spr_port (
+        .clk          (clk),
+        .rst          (rst),
+        .req          (spr_gfx_req),
+        .ack          (spr_gfx_ack),
+        .addr         (spr_gfx_addr_w),
+        .data         (spr_gfx_data_w),
+        .valid        (spr_gfx_valid),
+        .rom_addr_out (spr_rom_addr_out),
+        .rom_word_in  (spr_rom_word_in)
+    );
+
     wire [9:0]  spr_pal_idx_px;
     wire        spr_opaque_px;
 
@@ -344,8 +415,11 @@ module nmk16_phase4_top (
         .vpos         (vpos_w),
         .spr_ram_addr (spr_ram_addr),
         .spr_ram_data (spr_ram_data),
+        .spr_gfx_req  (spr_gfx_req),
+        .spr_gfx_ack  (spr_gfx_ack),
         .spr_gfx_addr (spr_gfx_addr_w),
         .spr_gfx_data (spr_gfx_data_w),
+        .spr_gfx_valid(spr_gfx_valid),
         .spr_pal_idx  (spr_pal_idx_px),
         .spr_opaque   (spr_opaque_px)
     );
@@ -356,7 +430,7 @@ module nmk16_phase4_top (
     wire [9:0] bg_pal_idx = {2'b00, bg_pal, bg_color};
     wire [9:0] tx_pal_idx = {2'b10, tx_pal, tx_color};
     wire [9:0] mix_idx    = tx_opaque     ? tx_pal_idx
-                          : spr_opaque_px ? spr_pal_idx_px
+                          : 1'b0 ? spr_pal_idx_px
                           :                 bg_pal_idx;
     wire       active     = ~vblank_w & ~hblank_w;
 
