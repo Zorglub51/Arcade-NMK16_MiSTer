@@ -58,7 +58,6 @@ set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_
 # 96 MHz design on a Cyclone V SE this trades essentially-irrelevant
 # timing margin for a compile that actually finishes.
 # --------------------------------------------------------------------------
-set_global_assignment -name OPTIMIZATION_MODE "AGGRESSIVE COMPILE TIME"
 set_global_assignment -name OPTIMIZATION_TECHNIQUE BALANCED
 set_global_assignment -name SYNTH_TIMING_DRIVEN_SYNTHESIS OFF
 set_global_assignment -name FITTER_EFFORT "FAST FIT"
