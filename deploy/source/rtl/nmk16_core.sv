@@ -380,7 +380,13 @@ module nmk16_core (
     // ---- DMA shadow: wram[$4000..$47FF] → spr_ram_shadow ----
     // MLAB ramstyle: async read so sprite_line's same-cycle data model
     // works without modification. 2048×16 bits ≈ 64 MLAB cells — trivial.
-    (* ramstyle = "MLAB" *) reg [15:0] spr_ram_shadow [0:2047];
+    //
+    // no_rw_check: tells Quartus we don't care about the read-during-write
+    // semantics here (sprite engine reads while DMA writes; either old or
+    // new value is fine — sprite reads happen during active scan, DMA runs
+    // during vblank, so they don't overlap in practice). Without this,
+    // Quartus fails RAM inference and builds the array as fabric.
+    (* ramstyle = "MLAB, no_rw_check" *) reg [15:0] spr_ram_shadow [0:2047];
     `ifdef VERILATOR
     integer kk;
     initial for (kk = 0; kk < 2048; kk = kk + 1) spr_ram_shadow[kk] = 16'h0000;

@@ -38,9 +38,15 @@ module sprite_line (
 
     // -----------------------------------------------------------------
     // Line buffers.  [15]=opaque  [9:0]=palette index.  Bit 15=0 means empty.
+    //
+    // ramstyle="MLAB" — these are read combinationally (mixer needs the
+    // pixel same-cycle), and MLAB cells support async read. Without the
+    // hint Quartus fails to infer them as block RAM and builds them as
+    // 4096 flip-flops + 256-input LUT mux per buffer (the deploy v2b
+    // memory blowup we hit on first compile).
     // -----------------------------------------------------------------
-    reg [15:0] buf_a [0:255];
-    reg [15:0] buf_b [0:255];
+    (* ramstyle = "MLAB" *) reg [15:0] buf_a [0:255];
+    (* ramstyle = "MLAB" *) reg [15:0] buf_b [0:255];
 
     reg front;   // 0 → mixer reads A, engine writes B
                  // 1 → mixer reads B, engine writes A
