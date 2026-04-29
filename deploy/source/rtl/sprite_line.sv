@@ -45,8 +45,8 @@ module sprite_line (
     // 4096 flip-flops + 256-input LUT mux per buffer (the deploy v2b
     // memory blowup we hit on first compile).
     // -----------------------------------------------------------------
-    (* ramstyle = "MLAB" *) reg [15:0] buf_a [0:255];
-    (* ramstyle = "MLAB" *) reg [15:0] buf_b [0:255];
+    (* ramstyle = "MLAB, no_rw_check" *) reg [15:0] buf_a [0:255];
+    (* ramstyle = "MLAB, no_rw_check" *) reg [15:0] buf_b [0:255];
 
     reg front;   // 0 → mixer reads A, engine writes B
                  // 1 → mixer reads B, engine writes A

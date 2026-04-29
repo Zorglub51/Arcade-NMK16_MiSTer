@@ -2469,7 +2469,7 @@ endmodule
 //
 
 module uRom( input clk, input [UADDR_WIDTH-1:0] microAddr, output logic [UROM_WIDTH-1:0] microOutput);
-	reg [UROM_WIDTH-1:0] uRam[ UROM_DEPTH];		
+	(* ramstyle = "M10K" *) reg [UROM_WIDTH-1:0] uRam[ UROM_DEPTH];		
 	initial begin
 		$readmemb("microrom.mem", uRam);
 	end
@@ -2480,7 +2480,7 @@ endmodule
 
 
 module nanoRom( input clk, input [NADDR_WIDTH-1:0] nanoAddr, output logic [NANO_WIDTH-1:0] nanoOutput);
-	reg [NANO_WIDTH-1:0] nRam[ NANO_DEPTH];		
+	(* ramstyle = "M10K" *) reg [NANO_WIDTH-1:0] nRam[ NANO_DEPTH];		
 	initial begin
 		$readmemb("nanorom.mem", nRam);
 	end

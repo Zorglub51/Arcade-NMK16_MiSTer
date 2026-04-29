@@ -180,10 +180,10 @@ module nmk16_core (
     // the multi-GB / multi-hour synthesis blow-up. With registered reads,
     // these infer cleanly as M10K block RAM.
     // -----------------------------------------------------------------
-    (* ramstyle = "M10K" *) reg [15:0] wram   [0:32767];   // 64 KiB
-    (* ramstyle = "M10K" *) reg [15:0] bgvram [0:8191];    // 16 KiB
-    (* ramstyle = "M10K" *) reg [15:0] txvram [0:1023];    //  2 KiB
-    (* ramstyle = "M10K" *) reg [15:0] palram [0:1023];    //  2 KiB
+    (* ramstyle = "M10K, no_rw_check" *) reg [15:0] wram   [0:32767];   // 64 KiB
+    (* ramstyle = "M10K, no_rw_check" *) reg [15:0] bgvram [0:8191];    // 16 KiB
+    (* ramstyle = "M10K, no_rw_check" *) reg [15:0] txvram [0:1023];    //  2 KiB
+    (* ramstyle = "M10K, no_rw_check" *) reg [15:0] palram [0:1023];    //  2 KiB
 
     reg [15:0] wram_rdata_cpu;       // port A: CPU read
     reg [15:0] wram_rdata_dma;       // port B: sprite-RAM shadow DMA

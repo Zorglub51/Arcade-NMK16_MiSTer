@@ -185,7 +185,7 @@ wire reset = RESET | status[0] | buttons[1] | ioctl_download | ~pll_locked;
 // ioctl_index == 0 → program ROM bytes stream in as {addr, byte}.
 // Pack into 16-bit big-endian words: even addrs = high byte, odd = low byte.
 
-reg  [15:0] prog_rom [0:131071];
+(* ramstyle = "M10K, no_rw_check" *) reg [15:0] prog_rom [0:131071];
 wire [16:0] prog_rom_addr;
 wire [15:0] prog_rom_data;
 
