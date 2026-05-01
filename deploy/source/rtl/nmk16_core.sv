@@ -134,7 +134,8 @@ module nmk16_core (
     wire        E_u, VMAn_u;
     wire [2:0]  FC;
     wire        BGn_u, oRESETn_u, oHALTEDn_u;
-    wire [15:0] iEdb, oEdb;
+    wire [15:0] oEdb;
+    reg  [15:0] iEdb;  // registered — see CPU read mux below
     wire [23:1] eab;
 
     wire is_iack = (FC == 3'b111) && !ASn;
@@ -311,16 +312,30 @@ module nmk16_core (
         endcase
     end
 
-    // 1-cycle BRAM read latency — within fx68k bus-cycle slack at clk=96 MHz
-    // (CPU bus phase is ~16 clk; the same pattern is already used for
-    // prog_rom in the wrapper).
-    assign iEdb = is_rom    ? prog_rom_data
-                : is_wram   ? wram_rdata_cpu
-                : is_bgvram ? bgvram_rdata_cpu
-                : is_txvram ? txvram_rdata_cpu
-                : is_pal    ? palram_rdata_cpu
-                : is_io_lo  ? io_rd
-                :             16'hFFFF;
+    // CPU read-data mux — REGISTERED.
+    //
+    // Previously this was a combinational 7-source ternary chain feeding
+    // fx68k's iEdb input directly. fx68k re-fans iEdb through hundreds of
+    // microcoded datapaths, so a wide combinational fan-in here produced
+    // a giant logic cone the synthesizer had to balance — the prime
+    // suspect for our 4-6h / 36-38 GB Quartus A&S blow-up.
+    //
+    // Registering iEdb adds one clk of read latency. fx68k tolerates it:
+    // the CPU bus phase at clk=96 MHz is ~16 clk, prog_rom_data already
+    // travels through a registered read (NMK16.sv:202-204), and DTACKn
+    // is asserted on the cycle iEdb becomes valid. All sources of this
+    // mux are already registered (BRAM rdata_cpu signals, prog_rom_reg,
+    // io_rd derived from registered I/O regs), so the added register
+    // just collapses the fan-in cone — no functional change.
+    always @(posedge clk) begin
+        if (is_rom)         iEdb <= prog_rom_data;
+        else if (is_wram)   iEdb <= wram_rdata_cpu;
+        else if (is_bgvram) iEdb <= bgvram_rdata_cpu;
+        else if (is_txvram) iEdb <= txvram_rdata_cpu;
+        else if (is_pal)    iEdb <= palram_rdata_cpu;
+        else if (is_io_lo)  iEdb <= io_rd;
+        else                iEdb <= 16'hFFFF;
+    end
 
     // -----------------------------------------------------------------
     // BG + TX layers — pipelined req/valid GFX through SDRAM
