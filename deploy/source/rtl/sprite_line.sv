@@ -1,17 +1,28 @@
 // NMK16 scanline sprite renderer — clean rewrite.
 //
-// Simple double-buffered design:
-//   - Two 256×16-bit line buffers (A and B).
-//   - 'front' register selects which the mixer reads; engine writes the other.
-//   - On each vpos change: swap front, clear the new back buffer, walk sprites.
-//   - Engine writes are latched to the back buffer determined at swap time.
+// Double-buffered design:
+//   - Two 256x16-bit line buffers (A and B), inferred as simple-dual-port
+//     M10K blocks. Each buffer has 1 sync read port (mixer) and 1 sync
+//     write port (engine). Reads return data 1 clk after addr.
+//   - 'front' selects which buffer the mixer reads (0=A, 1=B).
+//   - 'back'  selects which buffer the engine writes (0=A, 1=B).
+//   - Invariant maintained by the swap logic and reset values:
+//     back = ~front. Reset front=0 / back=1 -> mixer reads A while
+//     engine writes B from cycle 1.
+//   - On each vpos change: flip front, latch (old) front into back,
+//     clear the new back, walk sprites for the next visible line.
 //
-// GFX ROM interface (v2b): request/valid protocol, same as one channel of
-// rtl/sdram.sv. The engine issues a read per byte-address, waits for
-// `spr_gfx_valid`, and extracts the byte from the 16-bit SDRAM word using
-// the address LSB. This lets the engine sit behind a multi-cycle SDRAM
-// arbiter without losing fidelity — the line buffer absorbs latency
+// GFX ROM interface (v2b): request/valid protocol, same as one channel
+// of rtl/sdram.sv. The engine issues a read per byte-address, waits
+// for `spr_gfx_valid`, and extracts the byte from the 16-bit SDRAM
+// word using the address LSB. The line buffer absorbs SDRAM latency
 // variance, so the mixer never sees it.
+//
+// Memory: prior MLAB-async-read inference failed under Quartus 21.1
+// with "unsupported read-during-write behavior" — we now use M10K
+// sync read with the read result registered, and split the per-pair
+// double-write into two single-write states so each buffer has at
+// most one write port (clean simple-dual-port inference).
 
 `default_nettype none
 
@@ -37,24 +48,43 @@ module sprite_line (
 );
 
     // -----------------------------------------------------------------
-    // Line buffers.  [15]=opaque  [9:0]=palette index.  Bit 15=0 means empty.
-    //
-    // ramstyle="MLAB" — these are read combinationally (mixer needs the
-    // pixel same-cycle), and MLAB cells support async read. Without the
-    // hint Quartus fails to infer them as block RAM and builds them as
-    // 4096 flip-flops + 256-input LUT mux per buffer (the deploy v2b
-    // memory blowup we hit on first compile).
+    // Line buffers. [15]=opaque  [9:0]=palette index.  Bit 15=0 means empty.
+    // M10K simple-dual-port: 1R + 1W per array. Read is sync (1 clk).
     // -----------------------------------------------------------------
-    (* ramstyle = "MLAB, no_rw_check" *) reg [15:0] buf_a [0:255];
-    (* ramstyle = "MLAB, no_rw_check" *) reg [15:0] buf_b [0:255];
+    (* ramstyle = "M10K, no_rw_check" *) reg [15:0] buf_a [0:255];
+    (* ramstyle = "M10K, no_rw_check" *) reg [15:0] buf_b [0:255];
 
-    reg front;   // 0 → mixer reads A, engine writes B
-                 // 1 → mixer reads B, engine writes A
-    reg back;    // latched at swap: which buffer engine writes to (0=A,1=B)
+    reg front;
+    reg back;
 
-    // Mixer — read from front buffer
+    // Engine write port (1 write per clk; pulsed by FSM).
+    reg        wr_en;
+    reg [7:0]  wr_addr;
+    reg [15:0] wr_data;
+
+    // -----------------------------------------------------------------
+    // Mixer — sync read both buffers, then mux registered outputs by
+    // registered front. front_q tracks front by 1 clk so the mux pairs
+    // the right read result with the right buffer selection.
+    // -----------------------------------------------------------------
     wire [7:0] mx = (hpos >= 9'd92 && hpos < 9'd348) ? (hpos[7:0] - 8'd92) : 8'd0;
-    wire [15:0] front_px = front ? buf_b[mx] : buf_a[mx];
+
+    reg [15:0] read_a, read_b;
+    reg        front_q;
+
+    // Buffer A: write when back==0, read every cycle.
+    always @(posedge clk) begin
+        if (wr_en && back == 1'b0) buf_a[wr_addr] <= wr_data;
+        read_a <= buf_a[mx];
+    end
+    // Buffer B: write when back==1, read every cycle.
+    always @(posedge clk) begin
+        if (wr_en && back == 1'b1) buf_b[wr_addr] <= wr_data;
+        read_b <= buf_b[mx];
+    end
+    always @(posedge clk) front_q <= front;
+
+    wire [15:0] front_px = front_q ? read_b : read_a;
     assign spr_opaque  = front_px[15];
     assign spr_pal_idx = front_px[9:0];
 
@@ -69,7 +99,8 @@ module sprite_line (
         S_CHKY      = 4'd4,
         S_DRAW_REQ  = 4'd5,
         S_DRAW_WAIT = 4'd6,
-        S_DRAW_DO   = 4'd7;
+        S_DRAW_HI   = 4'd7,   // write hi pixel (or skip), advance to LO
+        S_DRAW_LO   = 4'd8;   // write lo pixel (or skip), advance pair/tile/sprite
 
     reg [3:0]  state;
     reg [7:0]  clr_idx;
@@ -80,7 +111,7 @@ module sprite_line (
     reg [3:0]  sp_pal, sp_w, sp_h;
     reg [3:0]  tile_x, px_pair;
     reg [8:0]  screen_y;  // screen-space Y for this fill (0..223)
-    reg [7:0]  pix_byte;   // captured byte from spr_gfx_data
+    reg [7:0]  pix_byte;  // captured byte from spr_gfx_data
 
     // Detect vpos change (1 cycle after irq.sv updates vpos via NBA)
     reg [8:0] prev_vpos;
@@ -104,12 +135,6 @@ module sprite_line (
     wire [3:0] pix_lo = pix_byte[3:0];
     wire [15:0] dx = {7'd0, sp_x} + {8'd0, tile_x, 4'b0} + {12'd0, px_pair, 1'b0};
 
-    // Write one pixel to back buffer
-    task automatic write_back(input [7:0] x, input [15:0] val);
-        if (back) buf_a[x] <= val;
-        else      buf_b[x] <= val;
-    endtask
-
     always @(posedge clk) begin
         if (rst) begin
             front     <= 1'b0;
@@ -127,25 +152,22 @@ module sprite_line (
             spr_gfx_req  <= 1'b0;
             spr_gfx_addr <= 24'd0;
             pix_byte     <= 8'd0;
+            wr_en        <= 1'b0;
+            wr_addr      <= 8'd0;
+            wr_data      <= 16'd0;
         end else begin
-            // Default: gfx_req drops after one cycle (or when ack pulses).
+            // Default: no write this cycle (state-specific code overrides).
+            wr_en <= 1'b0;
+
+            // Default: gfx_req drops once arbiter accepts.
             if (spr_gfx_ack) spr_gfx_req <= 1'b0;
 
             prev_vpos <= vpos;
 
             // ---- SWAP on every scanline boundary ----
             if (new_line) begin
-                front    <= ~front;        // flip display buffer
-                back     <= front;         // old front becomes new back (for engine)
-                // Start fill if this line is in the visible area.
-                // screen_y = next display line in screen coords.
-                // After swap, 'front' (new value) will be read during the
-                // NEXT scanline (vpos). The engine fills 'back' for that line.
-                // Screen-space: vpos 16..239 = screen 0..223.
-                // Start filling one line ahead of display so the buffer is
-                // ready when the mixer reads it during the NEXT vpos active area.
-                // Mixer during vpos=V reads screen_y = V - 16.
-                // We fill during vpos=V-1 for screen_y = V - 16 = (V-1) - 15.
+                front    <= ~front;
+                back     <= front;         // new back = old front
                 if (vpos >= 9'd15 && vpos < 9'd239) begin
                     screen_y     <= vpos - 9'd15;
                     state        <= S_CLEAR;
@@ -157,10 +179,12 @@ module sprite_line (
 
             // ---- ENGINE ----
             case (state)
-                S_IDLE: ; // nothing to do until next swap
+                S_IDLE: ;
 
                 S_CLEAR: begin
-                    write_back(clr_idx, 16'h0000);
+                    wr_en   <= 1'b1;
+                    wr_addr <= clr_idx;
+                    wr_data <= 16'h0000;
                     if (clr_idx == 8'd255) begin
                         spr_idx      <= 8'd0;
                         spr_ram_addr <= 15'h4000;
@@ -171,7 +195,6 @@ module sprite_line (
 
                 S_RDEN: begin
                     if (!spr_ram_data[0]) begin
-                        // disabled — next
                         if (spr_idx == 8'd255) state <= S_IDLE;
                         else begin
                             spr_idx      <= spr_idx + 8'd1;
@@ -221,28 +244,38 @@ module sprite_line (
                 end
 
                 S_DRAW_REQ: begin
-                    // Issue GFX read for the current pixel pair.
                     spr_gfx_addr <= {4'd0, gfx_byte_addr_next};
                     spr_gfx_req  <= 1'b1;
                     state        <= S_DRAW_WAIT;
                 end
 
                 S_DRAW_WAIT: begin
-                    // Wait for the SDRAM read to come back. Latency depends
-                    // on arbitration; line buffer absorbs variance.
                     if (spr_gfx_valid) begin
                         // 16-bit data is {byte at addr&~1, byte at addr|1}.
                         pix_byte <= spr_gfx_addr[0] ? spr_gfx_data[7:0]
-                                                   : spr_gfx_data[15:8];
-                        state    <= S_DRAW_DO;
+                                                    : spr_gfx_data[15:8];
+                        state    <= S_DRAW_HI;
                     end
                 end
 
-                S_DRAW_DO: begin
-                    if (dx < 16'd256 && pix_hi != 4'hF)
-                        write_back(dx[7:0], {1'b1, 5'd0, 2'b01, sp_pal, pix_hi});
-                    if (dx + 16'd1 < 16'd256 && pix_lo != 4'hF)
-                        write_back(dx[7:0] + 8'd1, {1'b1, 5'd0, 2'b01, sp_pal, pix_lo});
+                // Split the per-pair write into two cycles so each buffer
+                // sees at most one write per clock — required for clean
+                // simple-dual-port M10K inference.
+                S_DRAW_HI: begin
+                    if (dx < 16'd256 && pix_hi != 4'hF) begin
+                        wr_en   <= 1'b1;
+                        wr_addr <= dx[7:0];
+                        wr_data <= {1'b1, 5'd0, 2'b01, sp_pal, pix_hi};
+                    end
+                    state <= S_DRAW_LO;
+                end
+
+                S_DRAW_LO: begin
+                    if (dx + 16'd1 < 16'd256 && pix_lo != 4'hF) begin
+                        wr_en   <= 1'b1;
+                        wr_addr <= dx[7:0] + 8'd1;
+                        wr_data <= {1'b1, 5'd0, 2'b01, sp_pal, pix_lo};
+                    end
 
                     if (px_pair == 4'd7) begin
                         px_pair <= 4'd0;
